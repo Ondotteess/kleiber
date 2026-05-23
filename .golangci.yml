@@ -1,0 +1,75 @@
+# golangci-lint configuration for Kleiber.
+#
+# Weakening this file requires an ADR — see docs/agents/forbidden-actions.md §4.
+# When adding a //nolint pragma, you MUST include a justification on the same
+# line per docs/agents/forbidden-actions.md §4.
+
+run:
+  timeout: 5m
+  go: "1.25"
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - bodyclose
+    - errcheck
+    - gofmt
+    - goimports
+    - gosec
+    - gosimple
+    - govet
+    - ineffassign
+    - misspell
+    - prealloc
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+
+linters-settings:
+  gofmt:
+    simplify: true
+  goimports:
+    local-prefixes: github.com/Ondotteess/kleiber
+  govet:
+    enable-all: true
+    disable:
+      # fieldalignment is opinionated and not worth enforcing; readability wins.
+      - fieldalignment
+  revive:
+    severity: warning
+    rules:
+      - name: exported
+      - name: var-naming
+      - name: indent-error-flow
+      - name: error-return
+      - name: error-naming
+      - name: if-return
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: errorf
+      - name: empty-block
+      - name: superfluous-else
+      - name: unused-parameter
+      - name: unreachable-code
+      - name: redefines-builtin-id
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Test files routinely use patterns that gosec/unparam complain about.
+    - path: _test\.go
+      linters:
+        - gosec
+        - unparam
+        - errcheck
+    # doc.go is package documentation only; revive's "package-comments" rule
+    # is fine on it, but we silence noise from unused-parameter etc.
+    - path: doc\.go
+      linters:
+        - revive

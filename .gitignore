@@ -1,0 +1,47 @@
+# Built binaries and artifacts
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Coverage
+coverage.out
+coverage.html
+coverage/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Kleiber runtime artifacts that may end up in the repo by mistake
+.kleiber/cache/
+*.pprof
+*.trace
+*.prof
+
+# Logs
+*.log
+logs/
+
+# Environment / secrets — never commit
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Go workspace files (local convenience, not for the repo)
+go.work
+go.work.sum
+
+# Agents
+.claude
