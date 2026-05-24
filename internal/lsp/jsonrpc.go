@@ -298,15 +298,17 @@ func (e *ResponseError) Error() string {
 // concurrent use: an internal mutex serializes the header+body pair so
 // concurrent writers cannot interleave frames.
 //
-// Conn does not own the underlying reader/writer streams; close them on
-// the caller side (typically by stopping the subprocess that supplies
-// stdio).
+// Conn does not own the underlying reader/writer streams in production;
+// close them on the caller side (typically by stopping the subprocess
+// that supplies stdio). For tests, an optional Closer in ConnOptions
+// gives Close something to act on so blocked Reads can be unstuck.
 type Conn struct {
 	logger *slog.Logger
 
 	maxPayload int
 
-	r *bufio.Reader
+	r      *bufio.Reader
+	closer io.Closer // optional; closed by Conn.Close
 
 	mu sync.Mutex
 	w  io.Writer
@@ -319,6 +321,12 @@ type ConnOptions struct {
 
 	// Writer is the byte sink — e.g., a subprocess's stdin.
 	Writer io.Writer
+
+	// Closer, when non-nil, is invoked by Conn.Close. Production code
+	// usually leaves this nil and lets a higher-level supervisor (the
+	// Process) close pipes; tests pass the net.Conn or io.PipeWriter
+	// they own so blocked Reads can be released.
+	Closer io.Closer
 
 	// Logger receives debug-level diagnostics. Nil means discard.
 	Logger *slog.Logger
@@ -346,7 +354,21 @@ func NewConn(opts ConnOptions) *Conn {
 		maxPayload: max,
 		r:          bufio.NewReader(opts.Reader),
 		w:          opts.Writer,
+		closer:     opts.Closer,
 	}
+}
+
+// Close releases the resources passed via ConnOptions.Closer, if any.
+// It is a no-op when no Closer was supplied. Calling Close while a Read
+// is in progress causes the Read to return an error (the specific error
+// depends on the underlying transport).
+//
+// Close is idempotent for any well-behaved Closer.
+func (c *Conn) Close() error {
+	if c.closer == nil {
+		return nil
+	}
+	return c.closer.Close()
 }
 
 // Read decodes the next message from the underlying reader. It blocks
