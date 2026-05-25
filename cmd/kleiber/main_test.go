@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -41,5 +43,84 @@ func TestRun_NoArgs_PrintsPreAlphaNotice(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "pre-alpha") {
 		t.Errorf("stderr = %q, want it to mention pre-alpha", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "doctor") {
+		t.Errorf("stderr = %q, want it to advertise the doctor subcommand", stderr.String())
+	}
+}
+
+func TestRun_Help_PrintsUsage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run returned error: %v", err)
+	}
+	for _, want := range []string{"kleiber", "doctor", "Usage"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Errorf("help output missing %q; got %q", want, stdout.String())
+		}
+	}
+}
+
+func TestRun_UnknownSubcommand_Errors(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"bogus"}, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("run returned nil error for unknown subcommand")
+	}
+	if !strings.Contains(err.Error(), "bogus") {
+		t.Errorf("err = %q, want it to mention the unknown subcommand", err.Error())
+	}
+}
+
+func TestRun_DoctorSubcommand_NoGoMod(t *testing.T) {
+	// An empty temp dir has no go.mod, no multi-module, and the
+	// tools check runs against the real PATH. Whatever the result,
+	// run should succeed with non-empty stdout.
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"doctor", dir}, &stdout, &stderr); err != nil {
+		t.Fatalf("run doctor: %v", err)
+	}
+	if stdout.Len() == 0 {
+		t.Error("stdout is empty; doctor should print findings")
+	}
+	// Confirm the report contains at least one of the canonical
+	// check names.
+	if !strings.Contains(stdout.String(), "[toolchain]") {
+		t.Errorf("stdout does not mention [toolchain]; got %q", stdout.String())
+	}
+}
+
+func TestRun_DoctorSubcommand_ValidGoProject(t *testing.T) {
+	// Build a tiny one-module project and run the doctor on it.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/test\n\ngo 1.20\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"doctor", dir}, &stdout, &stderr); err != nil {
+		t.Fatalf("run doctor: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "[workspace]") {
+		t.Errorf("output missing [workspace] section: %q", out)
+	}
+	if !strings.Contains(out, "single Go module") {
+		t.Errorf("expected single-module workspace finding; got %q", out)
+	}
+}
+
+func TestRun_DoctorSubcommand_DefaultCwd(t *testing.T) {
+	// `kleiber doctor` with no path argument should use cwd. We can
+	// run it against the test's cwd — whatever findings come back,
+	// the call should succeed.
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"doctor"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run doctor: %v", err)
+	}
+	if stdout.Len() == 0 {
+		t.Error("stdout empty; doctor should print findings even for cwd")
 	}
 }
