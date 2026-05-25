@@ -286,6 +286,9 @@ func (c *Client) DidOpen(ctx context.Context, uri DocumentURI, languageID, text 
 	if !c.started.Load() {
 		return ErrClientNotStarted
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return c.notify(MethodTextDocumentDidOpen, DidOpenTextDocumentParams{
 		TextDocument: TextDocumentItem{
 			URI:        uri,
@@ -293,6 +296,39 @@ func (c *Client) DidOpen(ctx context.Context, uri DocumentURI, languageID, text 
 			Version:    1,
 			Text:       text,
 		},
+	})
+}
+
+// DidChange tells the server that a document's full text changed.
+// version is the editor's monotonically increasing document version.
+func (c *Client) DidChange(ctx context.Context, uri DocumentURI, version int, text string) error {
+	if !c.started.Load() {
+		return ErrClientNotStarted
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.notify(MethodTextDocumentDidChange, DidChangeTextDocumentParams{
+		TextDocument: VersionedTextDocumentIdentifier{
+			URI:     uri,
+			Version: version,
+		},
+		ContentChanges: []TextDocumentContentChangeEvent{{
+			Text: text,
+		}},
+	})
+}
+
+// DidClose tells the server that the editor closed a document.
+func (c *Client) DidClose(ctx context.Context, uri DocumentURI) error {
+	if !c.started.Load() {
+		return ErrClientNotStarted
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.notify(MethodTextDocumentDidClose, DidCloseTextDocumentParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
 	})
 }
 
@@ -318,6 +354,58 @@ func (c *Client) Hover(ctx context.Context, uri DocumentURI, pos Position) (*Hov
 		return nil, fmt.Errorf("lsp: decoding hover: %w", err)
 	}
 	return &h, nil
+}
+
+// Definition requests the locations that define the symbol at pos. A nil
+// slice with nil error means the server has no definition for that position.
+func (c *Client) Definition(ctx context.Context, uri DocumentURI, pos Position) ([]Location, error) {
+	if !c.started.Load() {
+		return nil, ErrClientNotStarted
+	}
+	raw, err := c.call(ctx, MethodTextDocumentDefinition, DefinitionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+		Position:     pos,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return decodeLocations(raw, MethodTextDocumentDefinition, true)
+}
+
+// References requests references to the symbol at pos. includeDeclaration
+// controls whether the symbol's declaration is included in the result.
+func (c *Client) References(ctx context.Context, uri DocumentURI, pos Position, includeDeclaration bool) ([]Location, error) {
+	if !c.started.Load() {
+		return nil, ErrClientNotStarted
+	}
+	raw, err := c.call(ctx, MethodTextDocumentReferences, ReferenceParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+		Position:     pos,
+		Context:      ReferenceContext{IncludeDeclaration: includeDeclaration},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return decodeLocations(raw, MethodTextDocumentReferences, false)
+}
+
+func decodeLocations(raw json.RawMessage, method string, allowSingle bool) ([]Location, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	var locations []Location
+	if err := json.Unmarshal(raw, &locations); err == nil {
+		return locations, nil
+	} else if !allowSingle {
+		return nil, fmt.Errorf("lsp: decoding %s locations: %w", method, err)
+	}
+
+	var location Location
+	if err := json.Unmarshal(raw, &location); err != nil {
+		return nil, fmt.Errorf("lsp: decoding %s location: %w", method, err)
+	}
+	return []Location{location}, nil
 }
 
 // call sends a Request and blocks until the matching Response arrives,
@@ -387,8 +475,22 @@ func (c *Client) readLoop() {
 		case *Notification:
 			c.dispatchNotification(m)
 		case *Request:
-			c.respondMethodNotFound(m)
+			c.dispatchRequest(m)
 		}
+	}
+}
+
+// dispatchRequest answers server-to-client requests. LSP lets servers ask the
+// client for capabilities/configuration at runtime; unsupported methods receive
+// method-not-found so the server can degrade cleanly.
+func (c *Client) dispatchRequest(req *Request) {
+	switch req.Method {
+	case MethodWorkspaceConfiguration:
+		c.respondWorkspaceConfiguration(req)
+	case MethodWindowShowMessageReq:
+		c.respondShowMessageRequest(req)
+	default:
+		c.respondMethodNotFound(req)
 	}
 }
 
@@ -450,10 +552,73 @@ func (c *Client) handlePublishDiagnostics(params json.RawMessage) {
 	}
 }
 
+// respondWorkspaceConfiguration answers workspace/configuration with no
+// configured values. The result must contain one entry per requested item.
+func (c *Client) respondWorkspaceConfiguration(req *Request) {
+	var params ConfigurationParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			if werr := c.conn.Write(&Response{
+				ID: req.ID,
+				Error: &ResponseError{
+					Code:    ErrCodeInvalidParams,
+					Message: fmt.Sprintf("invalid workspace/configuration params: %v", err),
+				},
+			}); werr != nil {
+				c.logger.Warn("responding workspace/configuration invalid params", "err", werr)
+			}
+			return
+		}
+	}
+	settings := make([]json.RawMessage, len(params.Items))
+	result, err := json.Marshal(settings)
+	if err != nil {
+		if werr := c.conn.Write(&Response{
+			ID: req.ID,
+			Error: &ResponseError{
+				Code:    ErrCodeInternalError,
+				Message: fmt.Sprintf("encoding workspace/configuration result: %v", err),
+			},
+		}); werr != nil {
+			c.logger.Warn("responding workspace/configuration encode error", "err", werr)
+		}
+		return
+	}
+	if err := c.conn.Write(&Response{ID: req.ID, Result: result}); err != nil {
+		c.logger.Warn("responding workspace/configuration", "err", err)
+	}
+}
+
+// respondShowMessageRequest acknowledges a server prompt without selecting an
+// action. UI wiring can replace this with a real modal/action picker later.
+func (c *Client) respondShowMessageRequest(req *Request) {
+	var params ShowMessageRequestParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			if werr := c.conn.Write(&Response{
+				ID: req.ID,
+				Error: &ResponseError{
+					Code:    ErrCodeInvalidParams,
+					Message: fmt.Sprintf("invalid window/showMessageRequest params: %v", err),
+				},
+			}); werr != nil {
+				c.logger.Warn("responding window/showMessageRequest invalid params", "err", werr)
+			}
+			return
+		}
+	}
+	c.logger.Info("server show-message request",
+		"type", params.Type,
+		"message", params.Message,
+	)
+	if err := c.conn.Write(&Response{ID: req.ID, Result: json.RawMessage("null")}); err != nil {
+		c.logger.Warn("responding window/showMessageRequest", "err", err)
+	}
+}
+
 // respondMethodNotFound answers a server-to-client request with a
-// MethodNotFound error. We do not yet handle any of the server-issued
-// methods (window/showMessageRequest, workspace/configuration,
-// client/registerCapability) so this is the safe default.
+// MethodNotFound error. We do not yet handle most server-issued methods
+// (client/registerCapability) so this is the safe default.
 func (c *Client) respondMethodNotFound(req *Request) {
 	err := c.conn.Write(&Response{
 		ID: req.ID,
@@ -550,6 +715,8 @@ func defaultClientCapabilities() ClientCapabilities {
 			Hover: &HoverClientCapabilities{
 				ContentFormat: []MarkupKind{MarkupKindPlainText, MarkupKindMarkdown},
 			},
+			Definition: &DefinitionClientCapabilities{},
+			References: &ReferenceClientCapabilities{},
 		},
 	}
 }

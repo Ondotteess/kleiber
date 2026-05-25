@@ -55,16 +55,11 @@ func requireGopls(t *testing.T) string {
 
 func uriFromPath(t *testing.T, p string) lsp.DocumentURI {
 	t.Helper()
-	abs, err := filepath.Abs(p)
+	uri, err := lsp.DocumentURIFromPath(p)
 	if err != nil {
-		t.Fatalf("abs: %v", err)
+		t.Fatalf("DocumentURIFromPath: %v", err)
 	}
-	abs = filepath.ToSlash(abs)
-	if len(abs) > 0 && abs[0] != '/' {
-		// Windows path like C:/...
-		return lsp.DocumentURI("file:///" + abs)
-	}
-	return lsp.DocumentURI("file://" + abs)
+	return uri
 }
 
 // TestClient_Integration_OpenHelloFixture drives the full LSP handshake

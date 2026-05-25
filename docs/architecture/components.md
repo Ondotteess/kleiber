@@ -13,27 +13,34 @@ This document drills into each core component: responsibilities, public API, dep
 **Public API (sketch):**
 ```go
 type Buffer interface {
-    ID() BufferID
-    Path() string
     Text() string
-    Insert(pos Position, text string) Edit
-    Delete(r Range) Edit
+    Insert(pos Position, text string) (Edit, error)
+    Delete(r Range) (Edit, error)
     Undo() (Edit, bool)
     Redo() (Edit, bool)
-    Subscribe(ch chan<- Event)
+    Observe(Observer)
 }
 
 type EditorEngine interface {
-    Open(path string) (Buffer, error)
+    Open(ctx context.Context, path string) (BufferID, error)
+    NewBuffer(text string) BufferID
     Close(id BufferID) error
-    Save(id BufferID) error
-    Buffers() []Buffer
+    Buffer(id BufferID) (*Buffer, error)
+    Path(id BufferID) (string, error)
+    Dirty(id BufferID) (bool, error)
+    Save(ctx context.Context, id BufferID) error
+    SaveAs(ctx context.Context, id BufferID, path string) error
+    Buffers() []BufferRef
+    Events() *events.Topic[BufferEvent]
 }
 ```
 
 **Dependencies:** Project Model (for file resolution), nothing UI.
 
-**Status:** Not started.
+**Status:** In progress. Implemented: byte-positioned text buffer, insert/delete,
+undo/redo, observer callbacks, thread-safe buffer access, engine-managed open/save,
+dirty tracking, and buffer lifecycle events. Not yet implemented: view/cursor/
+selection model, syntax highlighting, and integration with the LSP client.
 
 ## Project Model
 
@@ -102,21 +109,29 @@ type Dispatcher interface {
 ```go
 type Client interface {
     Start(ctx context.Context) error
-    Stop() error
+    Stop(ctx context.Context) error
 
-    DidOpen(uri string, text string) error
-    DidChange(uri string, edits []TextEdit) error
+    DidOpen(ctx context.Context, uri DocumentURI, languageID, text string) error
+    DidChange(ctx context.Context, uri DocumentURI, version int, text string) error
+    DidClose(ctx context.Context, uri DocumentURI) error
 
-    Hover(uri string, pos Position) (HoverInfo, error)
-    Definition(uri string, pos Position) ([]Location, error)
-    References(uri string, pos Position) ([]Location, error)
-    Diagnostics(uri string) []Diagnostic
+    Hover(ctx context.Context, uri DocumentURI, pos Position) (*Hover, error)
+    Definition(ctx context.Context, uri DocumentURI, pos Position) ([]Location, error)
+    References(ctx context.Context, uri DocumentURI, pos Position, includeDeclaration bool) ([]Location, error)
+    Diagnostics() *events.Topic[DiagnosticsEvent]
 }
 ```
 
-**Dependencies:** External `gopls` binary. JSON-RPC library (likely `go.lsp.dev/jsonrpc2`).
+**Dependencies:** External `gopls` binary. JSON-RPC/LSP framing is implemented
+in-package rather than through a third-party dependency.
 
-**Status:** Not started. Top priority for Milestone 1.
+**Status:** In progress. Implemented: subprocess supervision, JSON-RPC over stdio,
+initialize/initialized handshake, document open/change/close, diagnostics events,
+hover, go-to-definition, find references, file URI helpers, and byte-position to
+UTF-16 conversion. It also answers `workspace/configuration` with empty settings
+until project/user config is wired in, and acknowledges `window/showMessageRequest`
+without selecting an action until UI prompts exist. Not yet implemented:
+completions, formatting, code actions, restart policy, and editor/session wiring.
 
 ## AI Bridge
 

@@ -12,10 +12,11 @@
 //     its stdin/stdout as io streams. It knows nothing about JSON-RPC or
 //     LSP — Conn wraps Process's stdio to form the wire.
 //
-//   - Client (planned, separate PR) layers LSP semantics on top of Conn:
-//     initialize/initialized handshake, textDocument/didOpen, dispatch of
-//     publishDiagnostics into internal/events, and request/response
-//     correlation. See docs/architecture/components.md.
+//   - Client layers LSP semantics on top of Conn: initialize/initialized
+//     handshake, textDocument open/change/close, hover, definition,
+//     references, workspace/configuration and window/showMessageRequest
+//     responses, dispatch of publishDiagnostics into internal/events, and
+//     request/response correlation. See docs/architecture/components.md.
 //
 // On crash isolation: a dead gopls must not take the editor down with
 // it (docs/architecture/overview.md §"Design principles"). Process

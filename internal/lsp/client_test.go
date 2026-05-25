@@ -311,6 +311,75 @@ func TestClient_DidOpen_BeforeStart_Errors(t *testing.T) {
 	}
 }
 
+func TestClient_DidChange_SendsFullTextNotification(t *testing.T) {
+	client, server := connectedClient(t)
+	seen := make(chan *Notification, 1)
+	server.HandleNotification(MethodTextDocumentDidChange, func(n *Notification) {
+		seen <- n
+	})
+
+	if err := client.DidChange(context.Background(), "file:///x.go", 2, "package x\n\nvar A = 1\n"); err != nil {
+		t.Fatalf("DidChange: %v", err)
+	}
+
+	select {
+	case n := <-seen:
+		var p DidChangeTextDocumentParams
+		if err := json.Unmarshal(n.Params, &p); err != nil {
+			t.Fatalf("unmarshal params: %v", err)
+		}
+		if p.TextDocument.URI != "file:///x.go" {
+			t.Errorf("URI = %q, want file:///x.go", p.TextDocument.URI)
+		}
+		if p.TextDocument.Version != 2 {
+			t.Errorf("Version = %d, want 2", p.TextDocument.Version)
+		}
+		if len(p.ContentChanges) != 1 {
+			t.Fatalf("ContentChanges len = %d, want 1", len(p.ContentChanges))
+		}
+		if p.ContentChanges[0].Text != "package x\n\nvar A = 1\n" {
+			t.Errorf("Text = %q", p.ContentChanges[0].Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive didChange notification in 2s")
+	}
+}
+
+func TestClient_DidClose_SendsNotification(t *testing.T) {
+	client, server := connectedClient(t)
+	seen := make(chan *Notification, 1)
+	server.HandleNotification(MethodTextDocumentDidClose, func(n *Notification) {
+		seen <- n
+	})
+
+	if err := client.DidClose(context.Background(), "file:///x.go"); err != nil {
+		t.Fatalf("DidClose: %v", err)
+	}
+
+	select {
+	case n := <-seen:
+		var p DidCloseTextDocumentParams
+		if err := json.Unmarshal(n.Params, &p); err != nil {
+			t.Fatalf("unmarshal params: %v", err)
+		}
+		if p.TextDocument.URI != "file:///x.go" {
+			t.Errorf("URI = %q, want file:///x.go", p.TextDocument.URI)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive didClose notification in 2s")
+	}
+}
+
+func TestClient_DocumentSync_BeforeStart_Errors(t *testing.T) {
+	c := NewClient(ClientOptions{Logger: testLogger(t)})
+	if err := c.DidChange(context.Background(), "file:///x.go", 2, ""); !errors.Is(err, ErrClientNotStarted) {
+		t.Errorf("DidChange err = %v, want ErrClientNotStarted", err)
+	}
+	if err := c.DidClose(context.Background(), "file:///x.go"); !errors.Is(err, ErrClientNotStarted) {
+		t.Errorf("DidClose err = %v, want ErrClientNotStarted", err)
+	}
+}
+
 func TestClient_PublishDiagnostics_DeliveredToTopic(t *testing.T) {
 	client, server := connectedClient(t)
 	ch, cancel := client.Diagnostics().Subscribe(8)
@@ -392,6 +461,185 @@ func TestClient_Hover_NullResult_ReturnsNil(t *testing.T) {
 	}
 	if h != nil {
 		t.Errorf("Hover = %+v, want nil", h)
+	}
+}
+
+func TestClient_Definition_ReturnsSingleLocation(t *testing.T) {
+	client, server := connectedClient(t)
+	want := Location{
+		URI: "file:///def.go",
+		Range: Range{
+			Start: Position{Line: 3, Character: 4},
+			End:   Position{Line: 3, Character: 9},
+		},
+	}
+	server.Handle(MethodTextDocumentDefinition, func(req *Request) *Response {
+		var p DefinitionParams
+		_ = json.Unmarshal(req.Params, &p)
+		if p.TextDocument.URI != "file:///x.go" {
+			t.Errorf("URI = %q, want file:///x.go", p.TextDocument.URI)
+		}
+		if p.Position.Line != 7 {
+			t.Errorf("Position.Line = %d, want 7", p.Position.Line)
+		}
+		result, _ := json.Marshal(want)
+		return &Response{ID: req.ID, Result: result}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.Definition(ctx, "file:///x.go", Position{Line: 7, Character: 2})
+	if err != nil {
+		t.Fatalf("Definition: %v", err)
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("Definition = %+v, want [%+v]", got, want)
+	}
+}
+
+func TestClient_Definition_NullResult_ReturnsNil(t *testing.T) {
+	client, server := connectedClient(t)
+	server.Handle(MethodTextDocumentDefinition, func(req *Request) *Response {
+		return &Response{ID: req.ID, Result: json.RawMessage("null")}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.Definition(ctx, "file:///x.go", Position{})
+	if err != nil {
+		t.Fatalf("Definition: %v", err)
+	}
+	if got != nil {
+		t.Errorf("Definition = %+v, want nil", got)
+	}
+}
+
+func TestClient_Definition_ReturnsLocationArray(t *testing.T) {
+	client, server := connectedClient(t)
+	want := []Location{
+		{
+			URI: "file:///a.go",
+			Range: Range{
+				Start: Position{Line: 1, Character: 0},
+				End:   Position{Line: 1, Character: 1},
+			},
+		},
+		{
+			URI: "file:///b.go",
+			Range: Range{
+				Start: Position{Line: 2, Character: 0},
+				End:   Position{Line: 2, Character: 1},
+			},
+		},
+	}
+	server.Handle(MethodTextDocumentDefinition, func(req *Request) *Response {
+		result, _ := json.Marshal(want)
+		return &Response{ID: req.ID, Result: result}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.Definition(ctx, "file:///x.go", Position{})
+	if err != nil {
+		t.Fatalf("Definition: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Definition len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Definition[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestClient_References_ReturnsLocationsAndSendsContext(t *testing.T) {
+	client, server := connectedClient(t)
+	want := []Location{
+		{
+			URI: "file:///x.go",
+			Range: Range{
+				Start: Position{Line: 1, Character: 2},
+				End:   Position{Line: 1, Character: 5},
+			},
+		},
+		{
+			URI: "file:///y.go",
+			Range: Range{
+				Start: Position{Line: 9, Character: 0},
+				End:   Position{Line: 9, Character: 3},
+			},
+		},
+	}
+	server.Handle(MethodTextDocumentReferences, func(req *Request) *Response {
+		var p ReferenceParams
+		_ = json.Unmarshal(req.Params, &p)
+		if p.TextDocument.URI != "file:///x.go" {
+			t.Errorf("URI = %q, want file:///x.go", p.TextDocument.URI)
+		}
+		if !p.Context.IncludeDeclaration {
+			t.Error("IncludeDeclaration = false, want true")
+		}
+		result, _ := json.Marshal(want)
+		return &Response{ID: req.ID, Result: result}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.References(ctx, "file:///x.go", Position{Line: 7}, true)
+	if err != nil {
+		t.Fatalf("References: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("References len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("References[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestClient_References_NullResult_ReturnsNil(t *testing.T) {
+	client, server := connectedClient(t)
+	server.Handle(MethodTextDocumentReferences, func(req *Request) *Response {
+		return &Response{ID: req.ID, Result: json.RawMessage("null")}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.References(ctx, "file:///x.go", Position{}, false)
+	if err != nil {
+		t.Fatalf("References: %v", err)
+	}
+	if got != nil {
+		t.Errorf("References = %+v, want nil", got)
+	}
+}
+
+func TestClient_Navigation_BeforeStart_Errors(t *testing.T) {
+	c := NewClient(ClientOptions{Logger: testLogger(t)})
+	if _, err := c.Definition(context.Background(), "file:///x.go", Position{}); !errors.Is(err, ErrClientNotStarted) {
+		t.Errorf("Definition err = %v, want ErrClientNotStarted", err)
+	}
+	if _, err := c.References(context.Background(), "file:///x.go", Position{}, false); !errors.Is(err, ErrClientNotStarted) {
+		t.Errorf("References err = %v, want ErrClientNotStarted", err)
+	}
+}
+
+func TestDefaultClientCapabilities_AdvertisesNavigation(t *testing.T) {
+	caps := defaultClientCapabilities()
+	if caps.TextDocument == nil {
+		t.Fatal("TextDocument capabilities are nil")
+	}
+	if caps.TextDocument.Hover == nil {
+		t.Fatal("Hover capability is nil")
+	}
+	if caps.TextDocument.Definition == nil {
+		t.Fatal("Definition capability is nil")
+	}
+	if caps.TextDocument.References == nil {
+		t.Fatal("References capability is nil")
 	}
 }
 
@@ -524,7 +772,7 @@ func TestClient_Stop_RunsShutdownExitSequence(t *testing.T) {
 	}
 	select {
 	case <-exitSeen:
-	default:
+	case <-time.After(2 * time.Second):
 		t.Error("server did not see exit notification")
 	}
 }
@@ -548,6 +796,125 @@ func TestClient_ServerRequest_RespondsMethodNotFound(t *testing.T) {
 		}
 		if id, _ := resp.ID.Int64(); id != 9999 {
 			t.Errorf("response ID = %d, want 9999", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not see client response within 2s")
+	}
+}
+
+func TestClient_ServerRequest_WorkspaceConfiguration_ReturnsNullSettings(t *testing.T) {
+	client, server := connectedClient(t)
+	_ = client
+
+	params := ConfigurationParams{
+		Items: []ConfigurationItem{
+			{Section: "gopls"},
+			{ScopeURI: "file:///x.go", Section: "ui.diagnostic"},
+		},
+	}
+	if err := server.SendRequest(NewIntID(10001), MethodWorkspaceConfiguration, params); err != nil {
+		t.Fatalf("SendRequest: %v", err)
+	}
+
+	select {
+	case resp := <-server.ResponsesFromClient():
+		if resp.Error != nil {
+			t.Fatalf("Response.Error = %v, want nil", resp.Error)
+		}
+		if id, _ := resp.ID.Int64(); id != 10001 {
+			t.Errorf("response ID = %d, want 10001", id)
+		}
+		var got []json.RawMessage
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal result: %v", err)
+		}
+		if len(got) != len(params.Items) {
+			t.Fatalf("result len = %d, want %d", len(got), len(params.Items))
+		}
+		for i := range got {
+			if string(got[i]) != "null" {
+				t.Errorf("result[%d] = %s, want null", i, got[i])
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not see client response within 2s")
+	}
+}
+
+func TestClient_ServerRequest_WorkspaceConfiguration_InvalidParams(t *testing.T) {
+	client, server := connectedClient(t)
+	_ = client
+
+	if err := server.SendRequest(NewIntID(10002), MethodWorkspaceConfiguration, []string{"bad"}); err != nil {
+		t.Fatalf("SendRequest: %v", err)
+	}
+
+	select {
+	case resp := <-server.ResponsesFromClient():
+		if resp.Error == nil {
+			t.Fatal("Response.Error = nil, want invalid params")
+		}
+		if resp.Error.Code != ErrCodeInvalidParams {
+			t.Errorf("Error.Code = %d, want %d", resp.Error.Code, ErrCodeInvalidParams)
+		}
+		if id, _ := resp.ID.Int64(); id != 10002 {
+			t.Errorf("response ID = %d, want 10002", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not see client response within 2s")
+	}
+}
+
+func TestClient_ServerRequest_ShowMessageRequest_ReturnsNullAction(t *testing.T) {
+	client, server := connectedClient(t)
+	_ = client
+
+	params := ShowMessageRequestParams{
+		Type:    MessageTypeWarning,
+		Message: "pick one",
+		Actions: []MessageActionItem{
+			{Title: "A"},
+			{Title: "B"},
+		},
+	}
+	if err := server.SendRequest(NewIntID(10003), MethodWindowShowMessageReq, params); err != nil {
+		t.Fatalf("SendRequest: %v", err)
+	}
+
+	select {
+	case resp := <-server.ResponsesFromClient():
+		if resp.Error != nil {
+			t.Fatalf("Response.Error = %v, want nil", resp.Error)
+		}
+		if id, _ := resp.ID.Int64(); id != 10003 {
+			t.Errorf("response ID = %d, want 10003", id)
+		}
+		if string(resp.Result) != "null" {
+			t.Errorf("Result = %s, want null", resp.Result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not see client response within 2s")
+	}
+}
+
+func TestClient_ServerRequest_ShowMessageRequest_InvalidParams(t *testing.T) {
+	client, server := connectedClient(t)
+	_ = client
+
+	if err := server.SendRequest(NewIntID(10004), MethodWindowShowMessageReq, []string{"bad"}); err != nil {
+		t.Fatalf("SendRequest: %v", err)
+	}
+
+	select {
+	case resp := <-server.ResponsesFromClient():
+		if resp.Error == nil {
+			t.Fatal("Response.Error = nil, want invalid params")
+		}
+		if resp.Error.Code != ErrCodeInvalidParams {
+			t.Errorf("Error.Code = %d, want %d", resp.Error.Code, ErrCodeInvalidParams)
+		}
+		if id, _ := resp.ID.Int64(); id != 10004 {
+			t.Errorf("response ID = %d, want 10004", id)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("did not see client response within 2s")
