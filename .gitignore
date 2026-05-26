@@ -42,6 +42,8 @@ logs/
 # Go workspace files (local convenience, not for the repo)
 go.work
 go.work.sum
+.gocache
+.gomodcache
 
 # Agents
 .claude

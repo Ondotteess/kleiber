@@ -389,6 +389,29 @@ func (c *Client) References(ctx context.Context, uri DocumentURI, pos Position, 
 	return decodeLocations(raw, MethodTextDocumentReferences, false)
 }
 
+// Formatting requests full-document formatting edits for uri. A nil
+// slice with nil error means the server had no edits to apply.
+func (c *Client) Formatting(ctx context.Context, uri DocumentURI, opts FormattingOptions) ([]TextEdit, error) {
+	if !c.started.Load() {
+		return nil, ErrClientNotStarted
+	}
+	raw, err := c.call(ctx, MethodTextDocumentFormatting, DocumentFormattingParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+		Options:      opts,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var edits []TextEdit
+	if err := json.Unmarshal(raw, &edits); err != nil {
+		return nil, fmt.Errorf("lsp: decoding formatting edits: %w", err)
+	}
+	return edits, nil
+}
+
 func decodeLocations(raw json.RawMessage, method string, allowSingle bool) ([]Location, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
@@ -717,6 +740,7 @@ func defaultClientCapabilities() ClientCapabilities {
 			},
 			Definition: &DefinitionClientCapabilities{},
 			References: &ReferenceClientCapabilities{},
+			Formatting: &FormattingClientCapabilities{},
 		},
 	}
 }

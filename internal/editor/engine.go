@@ -36,6 +36,10 @@ var (
 
 	// ErrEmptySavePath is returned by SaveAs with an empty path.
 	ErrEmptySavePath = errors.New("editor: empty save path")
+
+	// ErrViewNotFound is returned by methods that take a ViewID
+	// when no such view is registered.
+	ErrViewNotFound = errors.New("editor: view not found")
 )
 
 // BufferID is an opaque handle for one buffer registered with an
@@ -43,12 +47,25 @@ var (
 // recycled when a buffer is closed.
 type BufferID int64
 
+// ViewID is an opaque handle for one View registered with an
+// EditorEngine. IDs are monotonic per engine and disjoint from
+// BufferIDs only by convention — do not interchange them.
+type ViewID int64
+
 // BufferRef is a lightweight snapshot of a registered buffer,
 // returned by Buffers().
 type BufferRef struct {
 	ID    BufferID
 	Path  string // empty for untitled
 	Dirty bool
+}
+
+// ViewRef is a lightweight snapshot of a registered view, returned
+// by Views().
+type ViewRef struct {
+	ID        ViewID
+	BufferID  BufferID
+	Selection Selection
 }
 
 // BufferEvent is one of BufferOpened, BufferChanged, BufferClosed,
@@ -96,6 +113,35 @@ type BufferSaved struct {
 
 func (BufferSaved) bufferEvent() {}
 
+// ViewOpened is emitted by NewView when a View enters the
+// engine's registry.
+type ViewOpened struct {
+	ID       ViewID
+	BufferID BufferID
+}
+
+func (ViewOpened) bufferEvent() {}
+
+// ViewClosed is emitted by CloseView (or by Close on the underlying
+// buffer) after the view has been removed from the registry.
+type ViewClosed struct {
+	ID       ViewID
+	BufferID BufferID
+}
+
+func (ViewClosed) bufferEvent() {}
+
+// ViewSelectionChanged wraps a SelectionChange observed on a managed
+// view. It is emitted for every move, self-driven edit, and external
+// transform that produces a different Selection.
+type ViewSelectionChanged struct {
+	ID       ViewID
+	BufferID BufferID
+	Change   SelectionChange
+}
+
+func (ViewSelectionChanged) bufferEvent() {}
+
 // EngineOptions configures NewEngine.
 type EngineOptions struct {
 	// Logger receives structured records. Nil maps to a discard
@@ -122,10 +168,12 @@ type EditorEngine struct {
 	logger *slog.Logger
 	events *events.Topic[BufferEvent]
 
-	nextID atomic.Int64
+	nextBufID  atomic.Int64
+	nextViewID atomic.Int64
 
 	mu      sync.RWMutex
 	buffers map[BufferID]*managedBuffer
+	views   map[ViewID]*managedView
 }
 
 // managedBuffer is the engine's record for one Buffer.
@@ -145,6 +193,13 @@ type managedBuffer struct {
 	writeMu sync.Mutex
 }
 
+// managedView is the engine's record for one View.
+type managedView struct {
+	id       ViewID
+	bufferID BufferID
+	view     *View
+}
+
 // NewEngine constructs an EditorEngine. The returned engine has no
 // registered buffers.
 func NewEngine(opts EngineOptions) *EditorEngine {
@@ -156,6 +211,7 @@ func NewEngine(opts EngineOptions) *EditorEngine {
 		logger:  logger,
 		events:  events.NewTopic[BufferEvent]("editor.buffer", logger),
 		buffers: map[BufferID]*managedBuffer{},
+		views:   map[ViewID]*managedView{},
 	}
 }
 
@@ -198,7 +254,7 @@ func (e *EditorEngine) NewBuffer(text string) BufferID {
 // forwards Changes onto the engine's event topic, and publishes
 // the BufferOpened event.
 func (e *EditorEngine) register(buf *Buffer, path string) BufferID {
-	id := BufferID(e.nextID.Add(1))
+	id := BufferID(e.nextBufID.Add(1))
 	mb := &managedBuffer{
 		id:        id,
 		buf:       buf,
@@ -230,6 +286,9 @@ func (e *EditorEngine) register(buf *Buffer, path string) BufferID {
 // publishes a BufferClosed event. Returns ErrBufferNotFound if no
 // such buffer is registered.
 //
+// Any views attached to the buffer are automatically removed and
+// emit ViewClosed events before the BufferClosed event.
+//
 // Close does not touch disk and does not affect the underlying
 // *Buffer — callers that still hold the pointer can keep using it
 // (but the engine will no longer publish events from it).
@@ -241,7 +300,20 @@ func (e *EditorEngine) Close(id BufferID) error {
 		return fmt.Errorf("%w: id=%d", ErrBufferNotFound, id)
 	}
 	delete(e.buffers, id)
+	attached := make([]*managedView, 0, len(e.views))
+	for vid, mv := range e.views {
+		if mv.bufferID == id {
+			attached = append(attached, mv)
+			delete(e.views, vid)
+		}
+	}
 	e.mu.Unlock()
+
+	// Sort by ID so cleanup events are deterministic.
+	sort.Slice(attached, func(i, j int) bool { return attached[i].id < attached[j].id })
+	for _, mv := range attached {
+		e.publish(ViewClosed{ID: mv.id, BufferID: id})
+	}
 
 	mb.pathMu.Lock()
 	path := mb.path
@@ -293,6 +365,94 @@ func (e *EditorEngine) Buffers() []BufferRef {
 		path := mb.path
 		mb.pathMu.Unlock()
 		refs = append(refs, BufferRef{ID: id, Path: path, Dirty: mb.dirty()})
+	}
+	e.mu.RUnlock()
+	sort.Slice(refs, func(i, j int) bool { return refs[i].ID < refs[j].ID })
+	return refs
+}
+
+// NewView constructs a View bound to the buffer with the given ID
+// and registers it with the engine. Selection-change events from the
+// view are forwarded to the engine's event topic as
+// ViewSelectionChanged. Returns ErrBufferNotFound if id is unknown.
+func (e *EditorEngine) NewView(bufID BufferID) (ViewID, error) {
+	e.mu.RLock()
+	mb, ok := e.buffers[bufID]
+	e.mu.RUnlock()
+	if !ok {
+		return 0, fmt.Errorf("%w: id=%d", ErrBufferNotFound, bufID)
+	}
+	v, err := NewView(mb.buf)
+	if err != nil {
+		return 0, fmt.Errorf("editor: constructing view: %w", err)
+	}
+	vid := ViewID(e.nextViewID.Add(1))
+	mv := &managedView{id: vid, bufferID: bufID, view: v}
+
+	v.Observe(func(ch SelectionChange) {
+		e.mu.RLock()
+		_, alive := e.views[vid]
+		e.mu.RUnlock()
+		if !alive {
+			return
+		}
+		e.publish(ViewSelectionChanged{ID: vid, BufferID: bufID, Change: ch})
+	})
+
+	e.mu.Lock()
+	e.views[vid] = mv
+	e.mu.Unlock()
+
+	e.publish(ViewOpened{ID: vid, BufferID: bufID})
+	return vid, nil
+}
+
+// View returns the *View for vid. The returned pointer is the live
+// view; callers drive cursor movement and editing on it directly.
+func (e *EditorEngine) View(vid ViewID) (*View, error) {
+	e.mu.RLock()
+	mv, ok := e.views[vid]
+	e.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("%w: id=%d", ErrViewNotFound, vid)
+	}
+	return mv.view, nil
+}
+
+// CloseView removes the view with the given ID from the registry and
+// publishes a ViewClosed event. Returns ErrViewNotFound if no such
+// view is registered. The underlying *View object remains usable for
+// callers that still hold a pointer, but it no longer emits engine
+// events.
+func (e *EditorEngine) CloseView(vid ViewID) error {
+	e.mu.Lock()
+	mv, ok := e.views[vid]
+	if !ok {
+		e.mu.Unlock()
+		return fmt.Errorf("%w: id=%d", ErrViewNotFound, vid)
+	}
+	delete(e.views, vid)
+	e.mu.Unlock()
+
+	e.publish(ViewClosed{ID: vid, BufferID: mv.bufferID})
+	return nil
+}
+
+// Views returns a snapshot of registered views, sorted by ID. If
+// bufferID is non-zero, only views attached to that buffer are
+// returned; zero acts as a wildcard.
+func (e *EditorEngine) Views(bufferID BufferID) []ViewRef {
+	e.mu.RLock()
+	refs := make([]ViewRef, 0, len(e.views))
+	for vid, mv := range e.views {
+		if bufferID != 0 && mv.bufferID != bufferID {
+			continue
+		}
+		refs = append(refs, ViewRef{
+			ID:        vid,
+			BufferID:  mv.bufferID,
+			Selection: mv.view.Selection(),
+		})
 	}
 	e.mu.RUnlock()
 	sort.Slice(refs, func(i, j int) bool { return refs[i].ID < refs[j].ID })

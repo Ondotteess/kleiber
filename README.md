@@ -6,13 +6,13 @@ Kleiber is an AI-native IDE for Go, written in Go. It treats concurrency, idioms
 > See [`docs/product/roadmap.md`](docs/product/roadmap.md) for the full milestone plan and
 > [`docs/product/vision.md`](docs/product/vision.md) for the product story.
 
-## Development status (2026-05-23)
+## Development status (2026-05-25)
 
 - [x] Documentation: vision, market analysis, architecture, agent protocol, contributing guides
 - [ ] **Phase 0 — Repo bootstrap** (in progress): module, build, CI, skeleton packages
 - [ ] Phase 1 — Core foundations (config, logging, event bus, project model, command dispatcher)
-- [ ] Phase 2 — Editor engine (buffer, view, undo, syntax)
-- [ ] Phase 3 — LSP client (gopls subprocess + LSP operations)
+- [ ] Phase 2 — Editor engine (in progress): buffer + undo/redo, view/cursor/selection with external-edit transform, engine-managed buffers and views; syntax highlighting pending
+- [ ] Phase 3 — LSP client (in progress): gopls subprocess + LSP operations, **editor↔LSP bridge** (didOpen/Change/Close + diagnostics routing), buffer formatting and format+save via LSP TextEdits; completions/save-time command wiring/restart policy pending
 - [ ] Phase 4 — UI layer v1 (gioui)
 - [ ] Phase 5 — Debugger & test runner (Delve via DAP, coverage, benchmarks)
 - [ ] Phase 6 — AI bridge (providers, gopls MCP, validated refactors)

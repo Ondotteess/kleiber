@@ -8,7 +8,7 @@ package lsp
 // Scope is intentionally narrow: we only declare what the current client
 // drives or answers (initialize/initialized handshake, document open/change/close,
 // workspace/configuration, window/showMessageRequest, publishDiagnostics,
-// hover, definition, and references).
+// hover, definition, references, and formatting).
 // Adding new methods is additive —
 // declare more types here, never mutate existing ones in incompatible
 // ways (see docs/agents/forbidden-actions.md §6).
@@ -231,6 +231,14 @@ type ReferenceClientCapabilities struct {
 	DynamicRegistration bool `json:"dynamicRegistration"`
 }
 
+// FormattingClientCapabilities lists document-formatting features the
+// client supports.
+type FormattingClientCapabilities struct {
+	// DynamicRegistration is false: Kleiber does not support runtime
+	// capability re-registration yet.
+	DynamicRegistration bool `json:"dynamicRegistration"`
+}
+
 // TextDocumentClientCapabilities collects per-document capabilities.
 type TextDocumentClientCapabilities struct {
 	Synchronization    *TextDocumentSyncClientCapabilities   `json:"synchronization,omitempty"`
@@ -238,6 +246,7 @@ type TextDocumentClientCapabilities struct {
 	Hover              *HoverClientCapabilities              `json:"hover,omitempty"`
 	Definition         *DefinitionClientCapabilities         `json:"definition,omitempty"`
 	References         *ReferenceClientCapabilities          `json:"references,omitempty"`
+	Formatting         *FormattingClientCapabilities         `json:"formatting,omitempty"`
 }
 
 // WorkspaceClientCapabilities is currently empty — we do not yet
@@ -389,6 +398,29 @@ type ReferenceParams struct {
 	Context      ReferenceContext       `json:"context"`
 }
 
+// FormattingOptions configures textDocument/formatting. The required
+// fields mirror LSP's FormattingOptions; optional booleans are pointers
+// so callers can distinguish "false" from "not specified".
+type FormattingOptions struct {
+	TabSize                int   `json:"tabSize"`
+	InsertSpaces           bool  `json:"insertSpaces"`
+	TrimTrailingWhitespace *bool `json:"trimTrailingWhitespace,omitempty"`
+	InsertFinalNewline     *bool `json:"insertFinalNewline,omitempty"`
+	TrimFinalNewlines      *bool `json:"trimFinalNewlines,omitempty"`
+}
+
+// DocumentFormattingParams is the payload for textDocument/formatting.
+type DocumentFormattingParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Options      FormattingOptions      `json:"options"`
+}
+
+// TextEdit replaces Range with NewText.
+type TextEdit struct {
+	Range   Range  `json:"range"`
+	NewText string `json:"newText"`
+}
+
 // MarkupKind identifies the format of hover and similar content.
 type MarkupKind string
 
@@ -434,6 +466,7 @@ const (
 	MethodTextDocumentHover      = "textDocument/hover"
 	MethodTextDocumentDefinition = "textDocument/definition"
 	MethodTextDocumentReferences = "textDocument/references"
+	MethodTextDocumentFormatting = "textDocument/formatting"
 	MethodWorkspaceConfiguration = "workspace/configuration"
 	MethodPublishDiagnostics     = "textDocument/publishDiagnostics"
 	MethodWindowLogMessage       = "window/logMessage"

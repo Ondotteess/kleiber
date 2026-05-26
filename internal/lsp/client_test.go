@@ -617,6 +617,67 @@ func TestClient_References_NullResult_ReturnsNil(t *testing.T) {
 	}
 }
 
+func TestClient_Formatting_ReturnsTextEditsAndSendsOptions(t *testing.T) {
+	client, server := connectedClient(t)
+	want := []TextEdit{{
+		Range: Range{
+			Start: Position{Line: 0, Character: 0},
+			End:   Position{Line: 0, Character: 12},
+		},
+		NewText: "package x\n",
+	}}
+	server.Handle(MethodTextDocumentFormatting, func(req *Request) *Response {
+		var p DocumentFormattingParams
+		_ = json.Unmarshal(req.Params, &p)
+		if p.TextDocument.URI != "file:///x.go" {
+			t.Errorf("URI = %q, want file:///x.go", p.TextDocument.URI)
+		}
+		if p.Options.TabSize != 4 {
+			t.Errorf("TabSize = %d, want 4", p.Options.TabSize)
+		}
+		if !p.Options.InsertSpaces {
+			t.Error("InsertSpaces = false, want true")
+		}
+		result, _ := json.Marshal(want)
+		return &Response{ID: req.ID, Result: result}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.Formatting(ctx, "file:///x.go", FormattingOptions{
+		TabSize:      4,
+		InsertSpaces: true,
+	})
+	if err != nil {
+		t.Fatalf("Formatting: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Formatting len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Formatting[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestClient_Formatting_NullResult_ReturnsNil(t *testing.T) {
+	client, server := connectedClient(t)
+	server.Handle(MethodTextDocumentFormatting, func(req *Request) *Response {
+		return &Response{ID: req.ID, Result: json.RawMessage("null")}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.Formatting(ctx, "file:///x.go", FormattingOptions{TabSize: 4})
+	if err != nil {
+		t.Fatalf("Formatting: %v", err)
+	}
+	if got != nil {
+		t.Errorf("Formatting = %+v, want nil", got)
+	}
+}
+
 func TestClient_Navigation_BeforeStart_Errors(t *testing.T) {
 	c := NewClient(ClientOptions{Logger: testLogger(t)})
 	if _, err := c.Definition(context.Background(), "file:///x.go", Position{}); !errors.Is(err, ErrClientNotStarted) {
@@ -624,6 +685,9 @@ func TestClient_Navigation_BeforeStart_Errors(t *testing.T) {
 	}
 	if _, err := c.References(context.Background(), "file:///x.go", Position{}, false); !errors.Is(err, ErrClientNotStarted) {
 		t.Errorf("References err = %v, want ErrClientNotStarted", err)
+	}
+	if _, err := c.Formatting(context.Background(), "file:///x.go", FormattingOptions{}); !errors.Is(err, ErrClientNotStarted) {
+		t.Errorf("Formatting err = %v, want ErrClientNotStarted", err)
 	}
 }
 
@@ -640,6 +704,9 @@ func TestDefaultClientCapabilities_AdvertisesNavigation(t *testing.T) {
 	}
 	if caps.TextDocument.References == nil {
 		t.Fatal("References capability is nil")
+	}
+	if caps.TextDocument.Formatting == nil {
+		t.Fatal("Formatting capability is nil")
 	}
 }
 

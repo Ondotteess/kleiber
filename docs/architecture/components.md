@@ -39,8 +39,11 @@ type EditorEngine interface {
 
 **Status:** In progress. Implemented: byte-positioned text buffer, insert/delete,
 undo/redo, observer callbacks, thread-safe buffer access, engine-managed open/save,
-dirty tracking, and buffer lifecycle events. Not yet implemented: view/cursor/
-selection model, syntax highlighting, and integration with the LSP client.
+dirty tracking, buffer lifecycle events, and a view/cursor/selection model
+(directed `Selection` over a `Buffer`, engine-managed `View` handles with their
+own selection events, automatic transform of selections against external buffer
+mutations and undo/redo). Not yet implemented: multi-cursor selections,
+syntax highlighting, and integration with the LSP client.
 
 ## Project Model
 
@@ -127,11 +130,23 @@ in-package rather than through a third-party dependency.
 
 **Status:** In progress. Implemented: subprocess supervision, JSON-RPC over stdio,
 initialize/initialized handshake, document open/change/close, diagnostics events,
-hover, go-to-definition, find references, file URI helpers, and byte-position to
-UTF-16 conversion. It also answers `workspace/configuration` with empty settings
+hover, go-to-definition, find references, document formatting requests,
+bridge-level buffer formatting via TextEdits, file URI helpers, and
+byte-position/UTF-16 conversion in both directions. It also answers
+`workspace/configuration` with empty settings
 until project/user config is wired in, and acknowledges `window/showMessageRequest`
-without selecting an action until UI prompts exist. Not yet implemented:
-completions, formatting, code actions, restart policy, and editor/session wiring.
+without selecting an action until UI prompts exist. An editor↔LSP bridge
+(`lsp.Bridge`) forwards `editor.BufferOpened/Changed/Closed` to
+`textDocument/didOpen|didChange|didClose` for `.go` files with a path, tracks
+per-buffer monotonic LSP versions, and routes `publishDiagnostics` back as
+`editor.BufferDiagnostics` events. It can also request formatting for a tracked
+buffer, reject stale edits if the buffer changes mid-request, apply returned
+TextEdits back into the editor buffer, and run an explicit format-then-save flow.
+Not yet implemented: completions, format-on-save command wiring, code actions,
+restart policy, incremental document sync,
+untitled-buffer follow-up after SaveAs, and UTF-16↔byte column conversion at the bridge
+boundary (currently passes characters through as byte columns — correct only
+for ASCII).
 
 ## AI Bridge
 
