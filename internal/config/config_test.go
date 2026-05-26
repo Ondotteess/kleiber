@@ -17,6 +17,9 @@ func TestDefault_HasSensibleValues(t *testing.T) {
 	if cfg.Logging.Level != "info" {
 		t.Errorf("Logging.Level = %q, want %q", cfg.Logging.Level, "info")
 	}
+	if cfg.Editor.FormatOnSave {
+		t.Error("Editor.FormatOnSave = true, want false until UI/settings UX exists")
+	}
 	if cfg.AI.Providers == nil {
 		t.Error("AI.Providers should be non-nil for ease of assignment")
 	}

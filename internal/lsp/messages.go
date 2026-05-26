@@ -8,7 +8,7 @@ package lsp
 // Scope is intentionally narrow: we only declare what the current client
 // drives or answers (initialize/initialized handshake, document open/change/close,
 // workspace/configuration, window/showMessageRequest, publishDiagnostics,
-// hover, definition, references, and formatting).
+// hover, completion, definition, references, and formatting).
 // Adding new methods is additive —
 // declare more types here, never mutate existing ones in incompatible
 // ways (see docs/agents/forbidden-actions.md §6).
@@ -204,7 +204,8 @@ type TextDocumentSyncClientCapabilities struct {
 // can do with diagnostics. Trimmed to bare minimum for v1.
 type PublishDiagnosticsClientCapabilities struct {
 	// VersionSupport reports diagnostics tagged with a document
-	// version. We accept them but do nothing special yet.
+	// version. The bridge drops stale versioned diagnostics before
+	// mapping UTF-16 ranges to editor byte positions.
 	VersionSupport bool `json:"versionSupport,omitempty"`
 }
 
@@ -213,6 +214,33 @@ type PublishDiagnosticsClientCapabilities struct {
 // markdown content automatically.
 type HoverClientCapabilities struct {
 	ContentFormat []MarkupKind `json:"contentFormat,omitempty"`
+}
+
+// CompletionClientCapabilities lists completion-request features the
+// client supports.
+type CompletionClientCapabilities struct {
+	// DynamicRegistration is false: Kleiber does not support runtime
+	// capability re-registration yet.
+	DynamicRegistration bool `json:"dynamicRegistration"`
+
+	// CompletionItem describes the item shapes Kleiber can decode.
+	CompletionItem *CompletionItemClientCapabilities `json:"completionItem,omitempty"`
+
+	// ContextSupport advertises that the client can send trigger
+	// context. Kleiber's v1 API sends plain invocation only, so this
+	// stays false until the UI has trigger-character awareness.
+	ContextSupport bool `json:"contextSupport,omitempty"`
+}
+
+// CompletionItemClientCapabilities lists item-level completion features
+// the client can decode.
+type CompletionItemClientCapabilities struct {
+	SnippetSupport       bool         `json:"snippetSupport,omitempty"`
+	DocumentationFormat  []MarkupKind `json:"documentationFormat,omitempty"`
+	DeprecatedSupport    bool         `json:"deprecatedSupport,omitempty"`
+	PreselectSupport     bool         `json:"preselectSupport,omitempty"`
+	InsertReplaceSupport bool         `json:"insertReplaceSupport,omitempty"`
+	LabelDetailsSupport  bool         `json:"labelDetailsSupport,omitempty"`
 }
 
 // DefinitionClientCapabilities lists definition-request features the
@@ -244,6 +272,7 @@ type TextDocumentClientCapabilities struct {
 	Synchronization    *TextDocumentSyncClientCapabilities   `json:"synchronization,omitempty"`
 	PublishDiagnostics *PublishDiagnosticsClientCapabilities `json:"publishDiagnostics,omitempty"`
 	Hover              *HoverClientCapabilities              `json:"hover,omitempty"`
+	Completion         *CompletionClientCapabilities         `json:"completion,omitempty"`
 	Definition         *DefinitionClientCapabilities         `json:"definition,omitempty"`
 	References         *ReferenceClientCapabilities          `json:"references,omitempty"`
 	Formatting         *FormattingClientCapabilities         `json:"formatting,omitempty"`
@@ -285,6 +314,11 @@ type ServerCapabilities struct {
 	// HoverProvider is either a boolean or an options object. We
 	// keep it opaque; Client only checks for truthiness.
 	HoverProvider json.RawMessage `json:"hoverProvider,omitempty"`
+
+	// CompletionProvider is either absent or an options object. We
+	// keep it opaque because v1 callers optimistically request
+	// completions and let the server answer.
+	CompletionProvider json.RawMessage `json:"completionProvider,omitempty"`
 }
 
 // TextDocumentSyncMode decodes the server's textDocumentSync capability.
@@ -380,6 +414,29 @@ type HoverParams struct {
 	Position     Position               `json:"position"`
 }
 
+// CompletionTriggerKind explains why a completion request was made.
+type CompletionTriggerKind int
+
+// Completion trigger kinds from the LSP specification.
+const (
+	CompletionTriggerInvoked                         CompletionTriggerKind = 1
+	CompletionTriggerTriggerCharacter                CompletionTriggerKind = 2
+	CompletionTriggerTriggerForIncompleteCompletions CompletionTriggerKind = 3
+)
+
+// CompletionContext optionally accompanies textDocument/completion.
+type CompletionContext struct {
+	TriggerKind      CompletionTriggerKind `json:"triggerKind"`
+	TriggerCharacter string                `json:"triggerCharacter,omitempty"`
+}
+
+// CompletionParams is the payload for textDocument/completion.
+type CompletionParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+	Position     Position               `json:"position"`
+	Context      *CompletionContext     `json:"context,omitempty"`
+}
+
 // DefinitionParams is the payload for textDocument/definition.
 type DefinitionParams struct {
 	TextDocument TextDocumentIdentifier `json:"textDocument"`
@@ -419,6 +476,137 @@ type DocumentFormattingParams struct {
 type TextEdit struct {
 	Range   Range  `json:"range"`
 	NewText string `json:"newText"`
+}
+
+// InsertReplaceEdit is the alternate completion edit shape added by
+// newer LSP versions. Insert and Replace must share the same start.
+type InsertReplaceEdit struct {
+	NewText string `json:"newText"`
+	Insert  Range  `json:"insert"`
+	Replace Range  `json:"replace"`
+}
+
+// CompletionTextEdit preserves the two legal completion textEdit
+// shapes: TextEdit and InsertReplaceEdit.
+type CompletionTextEdit struct {
+	TextEdit          *TextEdit
+	InsertReplaceEdit *InsertReplaceEdit
+}
+
+// UnmarshalJSON decodes a CompletionItem.textEdit union.
+func (e *CompletionTextEdit) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Range   *json.RawMessage `json:"range"`
+		Insert  *json.RawMessage `json:"insert"`
+		Replace *json.RawMessage `json:"replace"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	switch {
+	case probe.Range != nil:
+		var te TextEdit
+		if err := json.Unmarshal(data, &te); err != nil {
+			return err
+		}
+		e.TextEdit = &te
+		e.InsertReplaceEdit = nil
+		return nil
+	case probe.Insert != nil || probe.Replace != nil:
+		var ir InsertReplaceEdit
+		if err := json.Unmarshal(data, &ir); err != nil {
+			return err
+		}
+		e.TextEdit = nil
+		e.InsertReplaceEdit = &ir
+		return nil
+	default:
+		return fmt.Errorf("lsp: completion textEdit has unknown shape")
+	}
+}
+
+// CompletionItemKind classifies a completion item.
+type CompletionItemKind int
+
+// Completion item kinds from the LSP specification.
+const (
+	CompletionItemKindText CompletionItemKind = iota + 1
+	CompletionItemKindMethod
+	CompletionItemKindFunction
+	CompletionItemKindConstructor
+	CompletionItemKindField
+	CompletionItemKindVariable
+	CompletionItemKindClass
+	CompletionItemKindInterface
+	CompletionItemKindModule
+	CompletionItemKindProperty
+	CompletionItemKindUnit
+	CompletionItemKindValue
+	CompletionItemKindEnum
+	CompletionItemKindKeyword
+	CompletionItemKindSnippet
+	CompletionItemKindColor
+	CompletionItemKindFile
+	CompletionItemKindReference
+	CompletionItemKindFolder
+	CompletionItemKindEnumMember
+	CompletionItemKindConstant
+	CompletionItemKindStruct
+	CompletionItemKindEvent
+	CompletionItemKindOperator
+	CompletionItemKindTypeParameter
+)
+
+// InsertTextFormat tells the client whether InsertText is plaintext or
+// a snippet. Kleiber currently advertises no snippet support, but still
+// decodes the value defensively.
+type InsertTextFormat int
+
+// Insert text format constants from the LSP specification.
+const (
+	InsertTextFormatPlainText InsertTextFormat = 1
+	InsertTextFormatSnippet   InsertTextFormat = 2
+)
+
+// CompletionItemTag adds item metadata such as "deprecated".
+type CompletionItemTag int
+
+const (
+	CompletionItemTagDeprecated CompletionItemTag = 1
+)
+
+// CompletionItemLabelDetails carries structured label decorations.
+type CompletionItemLabelDetails struct {
+	Detail      string `json:"detail,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// CompletionItem is one completion candidate returned by the language
+// server. Documentation and Data remain raw JSON because servers use
+// several legal shapes and the UI does not render them yet.
+type CompletionItem struct {
+	Label               string                      `json:"label"`
+	LabelDetails        *CompletionItemLabelDetails `json:"labelDetails,omitempty"`
+	Kind                CompletionItemKind          `json:"kind,omitempty"`
+	Tags                []CompletionItemTag         `json:"tags,omitempty"`
+	Detail              string                      `json:"detail,omitempty"`
+	Documentation       json.RawMessage             `json:"documentation,omitempty"`
+	Deprecated          bool                        `json:"deprecated,omitempty"`
+	Preselect           bool                        `json:"preselect,omitempty"`
+	SortText            string                      `json:"sortText,omitempty"`
+	FilterText          string                      `json:"filterText,omitempty"`
+	InsertText          string                      `json:"insertText,omitempty"`
+	InsertTextFormat    InsertTextFormat            `json:"insertTextFormat,omitempty"`
+	TextEdit            *CompletionTextEdit         `json:"textEdit,omitempty"`
+	AdditionalTextEdits []TextEdit                  `json:"additionalTextEdits,omitempty"`
+	Data                json.RawMessage             `json:"data,omitempty"`
+}
+
+// CompletionList normalizes the two valid completion result shapes:
+// CompletionItem[] and {isIncomplete, items}.
+type CompletionList struct {
+	IsIncomplete bool             `json:"isIncomplete"`
+	Items        []CompletionItem `json:"items"`
 }
 
 // MarkupKind identifies the format of hover and similar content.
@@ -464,6 +652,7 @@ const (
 	MethodTextDocumentDidChange  = "textDocument/didChange"
 	MethodTextDocumentDidClose   = "textDocument/didClose"
 	MethodTextDocumentHover      = "textDocument/hover"
+	MethodTextDocumentCompletion = "textDocument/completion"
 	MethodTextDocumentDefinition = "textDocument/definition"
 	MethodTextDocumentReferences = "textDocument/references"
 	MethodTextDocumentFormatting = "textDocument/formatting"

@@ -53,9 +53,19 @@ fmt: ## Run gofmt -s -w across the repo
 	$(GO) fmt ./...
 
 lint: vet ## Run gofmt check, staticcheck, golangci-lint (skip silently if missing)
-	@drift=$$(gofmt -s -l . 2>/dev/null); \
+	@tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	drift=; \
+	for file in $$(git ls-files '*.go'); do \
+	    orig="$$tmp/orig/$$file"; fmt="$$tmp/fmt/$$file"; \
+	    mkdir -p "$$(dirname "$$orig")" "$$(dirname "$$fmt")"; \
+	    sed 's/\r$$//' "$$file" > "$$orig"; \
+	    cp "$$orig" "$$fmt"; \
+	    gofmt -s -w "$$fmt"; \
+	    if ! cmp -s "$$orig" "$$fmt"; then drift="$$drift$$file\n"; fi; \
+	done; \
 	if [ -n "$$drift" ]; then \
-	    echo "gofmt drift in:"; echo "$$drift"; exit 1; \
+	    printf "gofmt drift in:\n%b" "$$drift"; exit 1; \
 	fi
 	@command -v staticcheck >/dev/null 2>&1 && staticcheck ./... || echo "staticcheck not installed; skipping"
 	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run || echo "golangci-lint not installed; skipping"

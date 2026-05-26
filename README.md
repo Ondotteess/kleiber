@@ -2,17 +2,17 @@
 
 Kleiber is an AI-native IDE for Go, written in Go. It treats concurrency, idioms, and runtime data as first-class — not bolted-on extensions.
 
-> **Status:** pre-alpha. Phase 0 (repo bootstrap) in progress. No usable UI yet.
+> **Status:** pre-alpha. Core CLI and backend foundations are in progress. No usable UI yet.
 > See [`docs/product/roadmap.md`](docs/product/roadmap.md) for the full milestone plan and
 > [`docs/product/vision.md`](docs/product/vision.md) for the product story.
 
-## Development status (2026-05-25)
+## Development status (2026-05-26)
 
 - [x] Documentation: vision, market analysis, architecture, agent protocol, contributing guides
-- [ ] **Phase 0 — Repo bootstrap** (in progress): module, build, CI, skeleton packages
-- [ ] Phase 1 — Core foundations (config, logging, event bus, project model, command dispatcher)
-- [ ] Phase 2 — Editor engine (in progress): buffer + undo/redo, view/cursor/selection with external-edit transform, engine-managed buffers and views; syntax highlighting pending
-- [ ] Phase 3 — LSP client (in progress): gopls subprocess + LSP operations, **editor↔LSP bridge** (didOpen/Change/Close + diagnostics routing), buffer formatting and format+save via LSP TextEdits; completions/save-time command wiring/restart policy pending
+- [x] Phase 0 — Repo bootstrap: Go module, build scripts, CI, package skeletons, CLI entrypoint
+- [ ] **Phase 1 — Core foundations** (in progress): JSON config, logging, typed event bus, project model with go.work multi-module package loading/manual refresh/snapshots, command dispatcher, editor/project/LSP command registrations, doctor checks
+- [ ] Phase 2 — Editor engine (in progress): buffer + undo/redo, view/cursor/selection with external-edit transform, engine-managed buffers/views, and dispatcher-backed file/buffer/view actions; syntax highlighting pending
+- [ ] Phase 3 — LSP client (in progress): gopls subprocess + LSP operations, **editor↔LSP bridge** (didOpen/Change/Close + SaveAs lifecycle + UTF-16-safe diagnostics/navigation routing), completions, buffer formatting, format+save, config-gated save command wiring via LSP TextEdits, and tracked document snapshot/replay foundation; auto-restart policy pending
 - [ ] Phase 4 — UI layer v1 (gioui)
 - [ ] Phase 5 — Debugger & test runner (Delve via DAP, coverage, benchmarks)
 - [ ] Phase 6 — AI bridge (providers, gopls MCP, validated refactors)
@@ -24,7 +24,8 @@ This section is updated every 1–2 days.
 
 ## Quick start
 
-Requires Go 1.23+ and `make`. See [`docs/contributing/setup.md`](docs/contributing/setup.md) for the full setup guide and tool prerequisites.
+Requires Go 1.25+ and `make`. The Go floor is set by `go.mod` and ADR-007.
+See [`docs/contributing/setup.md`](docs/contributing/setup.md) for the full setup guide and tool prerequisites.
 
 ```bash
 git clone https://github.com/Ondotteess/kleiber.git
@@ -38,7 +39,17 @@ make build
 On Windows without `make`, the equivalent local check is:
 
 ```powershell
-./scripts/check.ps1
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\check.ps1
+```
+
+If your PowerShell policy already allows local scripts, `./scripts/check.ps1`
+works too.
+
+LSP integration tests use a real `gopls`. The normal integration lane skips
+cleanly when `gopls` is not on `PATH`; to require real LSP coverage locally:
+
+```powershell
+$env:KLEIBER_REQUIRE_GOPLS_INTEGRATION='1'; go test -tags=integration ./internal/lsp
 ```
 
 ## Documentation

@@ -2,7 +2,7 @@
 
 This roadmap is a living document. Dates are best-effort estimates, not commitments.
 
-Last updated: **2026-05-23**
+Last updated: **2026-05-26**
 
 ## Guiding principles
 
@@ -20,9 +20,18 @@ Deliverables:
 - File tree and file open/save.
 - `gopls` running as child process with LSP message exchange.
 - Hover, go-to-definition, find references.
-- Save-time formatting via `gofmt`.
+- Save-time formatting through `gopls`/Go formatting semantics.
 
 Out of scope: debugger, tests, AI, multi-window, themes beyond default.
+
+Current implementation checkpoint:
+- Runnable CLI surface: `kleiber --version`, `kleiber help`, and `kleiber doctor [path]`.
+- Core foundations exist for JSON config, logging, typed events, command dispatch,
+  go.work-aware project/module/package loading with manual refresh, filesystem watching,
+  defensive project snapshots, editor/project/LSP command registrations,
+  editor buffers/views, config-gated save/format-on-save orchestration, and LSP bridge operations
+  including tracked-document snapshot/replay groundwork for a future restart supervisor.
+- UI is still not usable; `internal/ui` contains only the gioui package contract from ADR-001.
 
 ## Milestone 2 — Debugger and Test Runner (target: Q4 2026)
 

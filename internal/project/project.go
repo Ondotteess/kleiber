@@ -25,6 +25,11 @@ var ErrFileOutsideProject = errors.New("project: file is outside project root")
 // file or a Go file in a directory go/packages did not return).
 var ErrFileNotInPackage = errors.New("project: file is not part of any loaded package")
 
+// ErrPackageLoad is returned by Open or Refresh when go/packages reports
+// package-level errors. Pre-alpha prefers failing loudly over exposing a
+// partially broken package graph as usable.
+var ErrPackageLoad = errors.New("project: package load error")
+
 // Project is the in-memory model of an opened Go workspace.
 //
 // Project is safe for concurrent use. Accessors return snapshots, never
@@ -78,6 +83,15 @@ type File struct {
 	IsTest  bool
 }
 
+// ProjectSnapshot is a point-in-time copy of project metadata suitable for UI
+// state reads. It does not perform I/O and is independent from Project's
+// internal slices.
+type ProjectSnapshot struct {
+	Root     string
+	Modules  []Module
+	Packages []Package
+}
+
 // Options controls Project construction.
 type Options struct {
 	// Logger receives diagnostic events. Nil means "discard logs".
@@ -103,12 +117,12 @@ func Open(ctx context.Context, root string, opts Options) (*Project, error) {
 		root:   absRoot,
 	}
 
-	if err := p.loadModules(ctx); err != nil {
+	modules, packages, err := p.loadSnapshot(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if err := p.loadPackages(ctx); err != nil {
-		return nil, err
-	}
+	p.modules = modules
+	p.packages = packages
 	p.logger.Info("project opened",
 		"modules", len(p.modules),
 		"packages", len(p.packages),
@@ -118,6 +132,69 @@ func Open(ctx context.Context, root string, opts Options) (*Project, error) {
 
 // Root returns the absolute project root directory.
 func (p *Project) Root() string { return p.root }
+
+// Snapshot returns a defensive copy of the project's current metadata. It is a
+// read-only state API for UI/orchestration callers; refreshing stale metadata is
+// explicit via Refresh.
+func (p *Project) Snapshot() ProjectSnapshot {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	modules := make([]Module, len(p.modules))
+	copy(modules, p.modules)
+
+	packages := make([]Package, len(p.packages))
+	for i, src := range p.packages {
+		packages[i] = src.clone()
+	}
+
+	return ProjectSnapshot{
+		Root:     p.root,
+		Modules:  modules,
+		Packages: packages,
+	}
+}
+
+// Refresh reloads module and package metadata from disk and swaps the
+// project's snapshots atomically. It is a manual operation: filesystem
+// Watch events are deliberately not wired to automatic reloads yet
+// because debounce and ownership rules belong in a higher orchestration
+// layer.
+func (p *Project) Refresh(ctx context.Context) error {
+	modules, packages, err := p.loadSnapshot(ctx)
+	if err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	p.modules = modules
+	p.packages = packages
+	p.mu.Unlock()
+
+	p.logger.Info("project refreshed",
+		"modules", len(modules),
+		"packages", len(packages),
+	)
+	return nil
+}
+
+func (p *Project) loadSnapshot(ctx context.Context) ([]Module, []Package, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	snapshot := &Project{
+		logger: p.logger,
+		root:   p.root,
+	}
+	if err := snapshot.loadModules(ctx); err != nil {
+		return nil, nil, err
+	}
+	if err := snapshot.loadPackages(ctx); err != nil {
+		return nil, nil, err
+	}
+	return snapshot.modules, snapshot.packages, nil
+}
 
 // Modules returns a snapshot of the project's modules.
 func (p *Project) Modules() []Module {

@@ -21,6 +21,7 @@ type EditorConfig struct {
 	FontFamily   string `json:"fontFamily"`
 	FontSize     int    `json:"fontSize"`
 	Theme        string `json:"theme"`
+	FormatOnSave bool   `json:"formatOnSave"`
 }
 
 // LSPConfig holds gopls-related settings.
@@ -67,6 +68,7 @@ func Default() Config {
 			FontFamily:   "monospace",
 			FontSize:     13,
 			Theme:        "default",
+			FormatOnSave: false,
 		},
 		LSP: LSPConfig{},
 		AI: AIConfig{

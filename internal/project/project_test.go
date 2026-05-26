@@ -42,6 +42,140 @@ func TestOpen_GoMod_LoadsModule(t *testing.T) {
 	}
 }
 
+func TestOpen_GoWork_LoadsPackagesFromAllModules(t *testing.T) {
+	root := t.TempDir()
+	modA := filepath.Join(root, "moda")
+	modB := filepath.Join(root, "modb")
+	if err := os.MkdirAll(modA, 0o755); err != nil {
+		t.Fatalf("MkdirAll modA: %v", err)
+	}
+	if err := os.MkdirAll(modB, 0o755); err != nil {
+		t.Fatalf("MkdirAll modB: %v", err)
+	}
+
+	writeFile(t, filepath.Join(root, "go.work"), "go 1.25.0\n\nuse (\n\t./moda\n\t./modb\n)\n")
+	writeFile(t, filepath.Join(modA, "go.mod"), "module example.test/moda\n\ngo 1.25\n")
+	writeFile(t, filepath.Join(modA, "a.go"), "package moda\n\nfunc A() {}\n")
+	writeFile(t, filepath.Join(modB, "go.mod"), "module example.test/modb\n\ngo 1.25\n")
+	modBFile := filepath.Join(modB, "b.go")
+	writeFile(t, modBFile, "package modb\n\nfunc B() {}\n")
+
+	p, err := Open(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	mods := p.Modules()
+	if len(mods) != 2 {
+		t.Fatalf("Modules() len = %d, want 2", len(mods))
+	}
+	if mods[0].Path != "example.test/moda" || mods[1].Path != "example.test/modb" {
+		t.Fatalf("Modules() = %+v, want moda then modb", mods)
+	}
+
+	if !hasPackage(p.Packages(), "example.test/moda") {
+		t.Fatalf("Packages() missing example.test/moda: %+v", p.Packages())
+	}
+	if !hasPackage(p.Packages(), "example.test/modb") {
+		t.Fatalf("Packages() missing example.test/modb: %+v", p.Packages())
+	}
+
+	file, err := p.FileForPath(modBFile)
+	if err != nil {
+		t.Fatalf("FileForPath(second module file): %v", err)
+	}
+	if file.Package.ImportPath != "example.test/modb" {
+		t.Fatalf("FileForPath package = %q, want example.test/modb", file.Package.ImportPath)
+	}
+}
+
+func TestOpen_PackageErrors_ReturnsError(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module example.test/broken\n\ngo 1.25\n")
+	writeFile(t, filepath.Join(root, "broken.go"), "package broken\n\nfunc broken( {\n")
+
+	_, err := Open(context.Background(), root, Options{})
+	if !errors.Is(err, ErrPackageLoad) {
+		t.Fatalf("Open err = %v, want ErrPackageLoad", err)
+	}
+	if !strings.Contains(err.Error(), "package load error") {
+		t.Fatalf("Open err = %v, want package load error detail", err)
+	}
+}
+
+func TestProject_Refresh_LoadsNewPackage(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module example.test/refresh\n\ngo 1.25\n")
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n\nfunc main() {}\n")
+
+	p, err := Open(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if hasPackage(p.Packages(), "example.test/refresh/pkg/extra") {
+		t.Fatal("new package visible before it exists")
+	}
+
+	extraDir := filepath.Join(root, "pkg", "extra")
+	if err := os.MkdirAll(extraDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll extraDir: %v", err)
+	}
+	writeFile(t, filepath.Join(extraDir, "extra.go"), "package extra\n\nfunc Extra() {}\n")
+
+	if err := p.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if !hasPackage(p.Packages(), "example.test/refresh/pkg/extra") {
+		t.Fatalf("Packages() missing new package after Refresh: %+v", p.Packages())
+	}
+}
+
+func TestProject_Refresh_FileForPathSeesNewTestFile(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module example.test/tests\n\ngo 1.25\n")
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n\nfunc main() {}\n")
+
+	p, err := Open(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	testFile := filepath.Join(root, "main_test.go")
+	writeFile(t, testFile, "package main\n\nimport \"testing\"\n\nfunc TestMainPackage(t *testing.T) {}\n")
+	if _, err := p.FileForPath(testFile); !errors.Is(err, ErrFileNotInPackage) {
+		t.Fatalf("FileForPath before Refresh err = %v, want ErrFileNotInPackage", err)
+	}
+
+	if err := p.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	file, err := p.FileForPath(testFile)
+	if err != nil {
+		t.Fatalf("FileForPath after Refresh: %v", err)
+	}
+	if !file.IsTest {
+		t.Fatal("FileForPath IsTest = false, want true")
+	}
+	if file.Package.ImportPath != "example.test/tests" {
+		t.Fatalf("FileForPath package = %q, want example.test/tests", file.Package.ImportPath)
+	}
+}
+
+func TestProject_Refresh_ContextCanceled(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "go.mod"), "module example.test/cancel\n\ngo 1.25\n")
+	writeFile(t, filepath.Join(root, "main.go"), "package main\n\nfunc main() {}\n")
+
+	p, err := Open(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.Refresh(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Refresh err = %v, want context.Canceled", err)
+	}
+}
+
 func TestParseModFile_GoMissing(t *testing.T) {
 	dir := t.TempDir()
 	goMod := filepath.Join(dir, "go.mod")
@@ -180,6 +314,15 @@ func TestPackagesSnapshot_IndependentMutation(t *testing.T) {
 	if got := p.packages[0].Files[0]; strings.HasSuffix(got, "mutated") || got == "mutated" {
 		t.Errorf("internal state mutated via snapshot: %q", got)
 	}
+}
+
+func hasPackage(pkgs []Package, importPath string) bool {
+	for _, pkg := range pkgs {
+		if pkg.ImportPath == importPath {
+			return true
+		}
+	}
+	return false
 }
 
 func writeFile(t *testing.T, path, contents string) {

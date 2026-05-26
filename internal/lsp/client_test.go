@@ -464,6 +464,141 @@ func TestClient_Hover_NullResult_ReturnsNil(t *testing.T) {
 	}
 }
 
+func TestClient_Completion_ReturnsListAndSendsPosition(t *testing.T) {
+	client, server := connectedClient(t)
+
+	server.Handle(MethodTextDocumentCompletion, func(req *Request) *Response {
+		var p CompletionParams
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			t.Errorf("unmarshal params: %v", err)
+		}
+		if p.TextDocument.URI != "file:///x.go" {
+			t.Errorf("URI = %q, want file:///x.go", p.TextDocument.URI)
+		}
+		if p.Position != (Position{Line: 7, Character: 11}) {
+			t.Errorf("Position = %+v, want line 7 character 11", p.Position)
+		}
+		return &Response{ID: req.ID, Result: json.RawMessage(`{
+			"isIncomplete": true,
+			"items": [{
+				"label": "Println",
+				"kind": 3,
+				"detail": "func",
+				"textEdit": {
+					"range": {
+						"start": {"line": 7, "character": 4},
+						"end": {"line": 7, "character": 11}
+					},
+					"newText": "Println"
+				},
+				"additionalTextEdits": [{
+					"range": {
+						"start": {"line": 0, "character": 0},
+						"end": {"line": 0, "character": 0}
+					},
+					"newText": "import \"fmt\"\n"
+				}]
+			}]
+		}`)}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.Completion(ctx, "file:///x.go", Position{Line: 7, Character: 11})
+	if err != nil {
+		t.Fatalf("Completion: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Completion = nil, want list")
+	}
+	if !got.IsIncomplete {
+		t.Error("IsIncomplete = false, want true")
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("Completion len = %d, want 1", len(got.Items))
+	}
+	item := got.Items[0]
+	if item.Label != "Println" || item.Kind != CompletionItemKindFunction || item.Detail != "func" {
+		t.Errorf("item = %+v, want Println function detail", item)
+	}
+	if item.TextEdit == nil || item.TextEdit.TextEdit == nil {
+		t.Fatalf("TextEdit = %+v, want regular TextEdit", item.TextEdit)
+	}
+	if item.TextEdit.TextEdit.NewText != "Println" {
+		t.Errorf("NewText = %q, want Println", item.TextEdit.TextEdit.NewText)
+	}
+	if len(item.AdditionalTextEdits) != 1 {
+		t.Fatalf("AdditionalTextEdits len = %d, want 1", len(item.AdditionalTextEdits))
+	}
+	if item.AdditionalTextEdits[0].NewText != "import \"fmt\"\n" {
+		t.Errorf("AdditionalTextEdits[0].NewText = %q", item.AdditionalTextEdits[0].NewText)
+	}
+	if item.AdditionalTextEdits[0].Range.Start != (Position{Line: 0, Character: 0}) {
+		t.Errorf("AdditionalTextEdits[0].Range.Start = %+v", item.AdditionalTextEdits[0].Range.Start)
+	}
+}
+
+func TestClient_Completion_ReturnsItemArray(t *testing.T) {
+	client, server := connectedClient(t)
+
+	server.Handle(MethodTextDocumentCompletion, func(req *Request) *Response {
+		return &Response{ID: req.ID, Result: json.RawMessage(`[{
+			"label": "fmt",
+			"textEdit": {
+				"newText": "fmt",
+				"insert": {
+					"start": {"line": 1, "character": 2},
+					"end": {"line": 1, "character": 3}
+				},
+				"replace": {
+					"start": {"line": 1, "character": 2},
+					"end": {"line": 1, "character": 5}
+				}
+			}
+		}]`)}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.Completion(ctx, "file:///x.go", Position{})
+	if err != nil {
+		t.Fatalf("Completion: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Completion = nil, want list")
+	}
+	if got.IsIncomplete {
+		t.Error("IsIncomplete = true, want false for array result")
+	}
+	if len(got.Items) != 1 {
+		t.Fatalf("Completion len = %d, want 1", len(got.Items))
+	}
+	edit := got.Items[0].TextEdit
+	if edit == nil || edit.InsertReplaceEdit == nil {
+		t.Fatalf("TextEdit = %+v, want InsertReplaceEdit", edit)
+	}
+	if edit.InsertReplaceEdit.Replace.End.Character != 5 {
+		t.Errorf("replace end = %+v, want character 5", edit.InsertReplaceEdit.Replace.End)
+	}
+}
+
+func TestClient_Completion_NullResult_ReturnsNil(t *testing.T) {
+	client, server := connectedClient(t)
+	server.Handle(MethodTextDocumentCompletion, func(req *Request) *Response {
+		return &Response{ID: req.ID, Result: json.RawMessage("null")}
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	got, err := client.Completion(ctx, "file:///x.go", Position{})
+	if err != nil {
+		t.Fatalf("Completion: %v", err)
+	}
+	if got != nil {
+		t.Errorf("Completion = %+v, want nil", got)
+	}
+}
+
 func TestClient_Definition_ReturnsSingleLocation(t *testing.T) {
 	client, server := connectedClient(t)
 	want := Location{
@@ -686,6 +821,9 @@ func TestClient_Navigation_BeforeStart_Errors(t *testing.T) {
 	if _, err := c.References(context.Background(), "file:///x.go", Position{}, false); !errors.Is(err, ErrClientNotStarted) {
 		t.Errorf("References err = %v, want ErrClientNotStarted", err)
 	}
+	if _, err := c.Completion(context.Background(), "file:///x.go", Position{}); !errors.Is(err, ErrClientNotStarted) {
+		t.Errorf("Completion err = %v, want ErrClientNotStarted", err)
+	}
 	if _, err := c.Formatting(context.Background(), "file:///x.go", FormattingOptions{}); !errors.Is(err, ErrClientNotStarted) {
 		t.Errorf("Formatting err = %v, want ErrClientNotStarted", err)
 	}
@@ -698,6 +836,21 @@ func TestDefaultClientCapabilities_AdvertisesNavigation(t *testing.T) {
 	}
 	if caps.TextDocument.Hover == nil {
 		t.Fatal("Hover capability is nil")
+	}
+	if caps.TextDocument.PublishDiagnostics == nil {
+		t.Fatal("PublishDiagnostics capability is nil")
+	}
+	if !caps.TextDocument.PublishDiagnostics.VersionSupport {
+		t.Fatal("PublishDiagnostics.VersionSupport = false, want true")
+	}
+	if caps.TextDocument.Completion == nil {
+		t.Fatal("Completion capability is nil")
+	}
+	if caps.TextDocument.Completion.CompletionItem == nil {
+		t.Fatal("CompletionItem capability is nil")
+	}
+	if !caps.TextDocument.Completion.CompletionItem.InsertReplaceSupport {
+		t.Fatal("InsertReplaceSupport = false, want true")
 	}
 	if caps.TextDocument.Definition == nil {
 		t.Fatal("Definition capability is nil")

@@ -13,6 +13,8 @@ import (
 	"github.com/Ondotteess/kleiber/internal/lsp"
 )
 
+const requireGoplsIntegrationEnv = "KLEIBER_REQUIRE_GOPLS_INTEGRATION"
+
 // helloFixture walks upward from the test's working directory looking
 // for fixtures/hello/go.mod and returns the containing directory. This
 // mirrors the helper used by project's integration test so behavior
@@ -48,7 +50,13 @@ func requireGopls(t *testing.T) string {
 	t.Helper()
 	bin, err := exec.LookPath("gopls")
 	if err != nil {
+		if os.Getenv(requireGoplsIntegrationEnv) == "1" {
+			t.Fatalf("%s=1 but gopls not found on PATH: %v", requireGoplsIntegrationEnv, err)
+		}
 		t.Skipf("gopls not found on PATH; skipping integration test")
+	}
+	if os.Getenv(requireGoplsIntegrationEnv) == "1" {
+		t.Logf("%s=1; using gopls at %s", requireGoplsIntegrationEnv, bin)
 	}
 	return bin
 }

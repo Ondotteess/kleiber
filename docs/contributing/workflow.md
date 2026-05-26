@@ -76,12 +76,16 @@ CI runs on every push to a PR:
 - `go build ./...`
 - `go test ./...`
 - `go test -race ./...`
-- `gofmt -s -d .` (must be empty)
+- tracked Go file formatting check via `scripts/check.*` / `git ls-files '*.go'`
 - `go vet ./...`
 - `staticcheck ./...`
 - `golangci-lint run`
 
 All must pass before merge.
+
+Do not use repo-wide `gofmt -s -d .` as the source of truth: ignored dependency
+caches and module testdata can live under the working directory. The project
+formatting contract is the tracked Go file set.
 
 ### Merging
 

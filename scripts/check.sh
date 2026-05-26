@@ -5,7 +5,7 @@
 #   1. go mod verify
 #   2. go build ./...
 #   3. go vet ./...
-#   4. gofmt -s -d .   (must be empty)
+#   4. gofmt -s -d tracked Go files   (must be empty)
 #   5. go test ./...
 #   6. go test -race ./...   (skipped if cgo is unavailable, with a warning)
 #
@@ -29,6 +29,29 @@ have_cgo_toolchain() {
     command -v "$cc" >/dev/null 2>&1
 }
 
+tracked_go_files() {
+    # Check only tracked files; ignored caches such as .gomodcache may contain
+    # dependency testdata that is not part of this repository's formatting contract.
+    git ls-files '*.go'
+}
+
+gofmt_drift_files() {
+    local tmp orig fmt file
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' RETURN
+    for file in "$@"; do
+        orig="$tmp/orig/$file"
+        fmt="$tmp/fmt/$file"
+        mkdir -p "$(dirname "$orig")" "$(dirname "$fmt")"
+        sed 's/\r$//' "$file" >"$orig"
+        cp "$orig" "$fmt"
+        gofmt -s -w "$fmt"
+        if ! cmp -s "$orig" "$fmt"; then
+            printf '%s\n' "$file"
+        fi
+    done
+}
+
 step "go mod verify"
 go mod verify
 
@@ -38,10 +61,15 @@ go build ./...
 step "go vet ./..."
 go vet ./...
 
-step "gofmt -s -d ."
-drift=$(gofmt -s -d .)
+step "gofmt -s -d tracked Go files"
+mapfile -t go_files < <(tracked_go_files)
+if ((${#go_files[@]})); then
+    drift=$(gofmt_drift_files "${go_files[@]}")
+else
+    drift=
+fi
 if [ -n "$drift" ]; then
-    printf 'gofmt drift detected:\n%s\n' "$drift"
+    printf 'gofmt drift detected in:\n%s\n' "$drift"
     exit 1
 fi
 

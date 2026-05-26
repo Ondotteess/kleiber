@@ -86,7 +86,7 @@ type ClientOptions struct {
 
 // Client is a high-level LSP client wired to gopls.
 //
-// Lifecycle: NewClient → Start (handshake) → DidOpen/Hover/... → Stop.
+// Lifecycle: NewClient → Start (handshake) → DidOpen/Hover/Completion/... → Stop.
 // A Client is one-shot: after Stop returns, do not call Start again.
 //
 // Concurrency: methods are safe for concurrent use. Internally the
@@ -356,6 +356,22 @@ func (c *Client) Hover(ctx context.Context, uri DocumentURI, pos Position) (*Hov
 	return &h, nil
 }
 
+// Completion requests completion candidates at pos. A nil *CompletionList
+// with nil error means the server has no candidates for that position.
+func (c *Client) Completion(ctx context.Context, uri DocumentURI, pos Position) (*CompletionList, error) {
+	if !c.started.Load() {
+		return nil, ErrClientNotStarted
+	}
+	raw, err := c.call(ctx, MethodTextDocumentCompletion, CompletionParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+		Position:     pos,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return decodeCompletionList(raw)
+}
+
 // Definition requests the locations that define the symbol at pos. A nil
 // slice with nil error means the server has no definition for that position.
 func (c *Client) Definition(ctx context.Context, uri DocumentURI, pos Position) ([]Location, error) {
@@ -410,6 +426,23 @@ func (c *Client) Formatting(ctx context.Context, uri DocumentURI, opts Formattin
 		return nil, fmt.Errorf("lsp: decoding formatting edits: %w", err)
 	}
 	return edits, nil
+}
+
+func decodeCompletionList(raw json.RawMessage) (*CompletionList, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	var list CompletionList
+	if err := json.Unmarshal(raw, &list); err == nil && list.Items != nil {
+		return &list, nil
+	}
+
+	var items []CompletionItem
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("lsp: decoding completion result: %w", err)
+	}
+	return &CompletionList{Items: items}, nil
 }
 
 func decodeLocations(raw json.RawMessage, method string, allowSingle bool) ([]Location, error) {
@@ -734,9 +767,18 @@ func defaultClientCapabilities() ClientCapabilities {
 		},
 		TextDocument: &TextDocumentClientCapabilities{
 			Synchronization:    &TextDocumentSyncClientCapabilities{},
-			PublishDiagnostics: &PublishDiagnosticsClientCapabilities{},
+			PublishDiagnostics: &PublishDiagnosticsClientCapabilities{VersionSupport: true},
 			Hover: &HoverClientCapabilities{
 				ContentFormat: []MarkupKind{MarkupKindPlainText, MarkupKindMarkdown},
+			},
+			Completion: &CompletionClientCapabilities{
+				CompletionItem: &CompletionItemClientCapabilities{
+					DocumentationFormat:  []MarkupKind{MarkupKindPlainText, MarkupKindMarkdown},
+					DeprecatedSupport:    true,
+					PreselectSupport:     true,
+					InsertReplaceSupport: true,
+					LabelDetailsSupport:  true,
+				},
 			},
 			Definition: &DefinitionClientCapabilities{},
 			References: &ReferenceClientCapabilities{},

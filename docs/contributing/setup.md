@@ -65,6 +65,19 @@ Run integration tests (separate from unit tests):
 go test -tags=integration ./...
 ```
 
+The LSP integration suite uses a real `gopls`. By default it skips cleanly when
+`gopls` is not on `PATH`; strict verification can require it:
+
+```bash
+KLEIBER_REQUIRE_GOPLS_INTEGRATION=1 go test -tags=integration ./internal/lsp
+```
+
+PowerShell equivalent:
+
+```powershell
+$env:KLEIBER_REQUIRE_GOPLS_INTEGRATION='1'; go test -tags=integration ./internal/lsp
+```
+
 ## Linters
 
 ```bash
@@ -74,11 +87,15 @@ make lint
 Or individually:
 
 ```bash
-gofmt -s -d .
 go vet ./...
 staticcheck ./...
 golangci-lint run
 ```
+
+For formatting drift, prefer `make lint`, `scripts/check.sh`, or
+`scripts/check.ps1`. The scripts check only tracked Go files via
+`git ls-files '*.go'` so ignored module/cache directories such as `.gomodcache`
+are not part of the repository formatting contract.
 
 ## Common dev tasks
 
@@ -126,7 +143,11 @@ To enable race coverage locally on Windows, install a C toolchain:
   `PATH`.
 - **MinGW-w64 standalone**: https://www.mingw-w64.org
 
-Then `go env CGO_ENABLED=1` (one-time) and re-run `scripts/check.ps1`.
+Then `go env CGO_ENABLED=1` (one-time) and re-run:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\scripts\check.ps1
+```
 
 The script auto-detects the toolchain and skips race with a warning if
 it's missing — CI on `windows-latest` ships MinGW and runs `-race` on

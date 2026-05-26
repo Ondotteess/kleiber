@@ -23,6 +23,45 @@ function HaveCgoToolchain {
     return [bool](Get-Command $cc -ErrorAction SilentlyContinue)
 }
 
+function TrackedGoFiles {
+    # Check only tracked files; ignored caches such as .gomodcache may contain
+    # dependency testdata that is not part of this repository's formatting contract.
+    $files = @(git ls-files '*.go')
+    if ($LASTEXITCODE -ne 0) { throw "git ls-files failed" }
+    return $files
+}
+
+function GofmtDriftFiles([string[]]$Files) {
+    $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("kleiber-gofmt-" + [guid]::NewGuid())
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    $drift = @()
+    try {
+        foreach ($file in $Files) {
+            $src = Join-Path (Get-Location) $file
+            $normalized = [System.IO.File]::ReadAllText($src).Replace("`r`n", "`n")
+
+            $tmp = Join-Path $tmpRoot $file
+            $tmpDir = Split-Path -Parent $tmp
+            New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+            [System.IO.File]::WriteAllText($tmp, $normalized, $utf8NoBom)
+
+            & gofmt -s -w $tmp
+            if ($LASTEXITCODE -ne 0) { throw "gofmt failed to run" }
+
+            $formatted = [System.IO.File]::ReadAllText($tmp).Replace("`r`n", "`n")
+            if ($normalized -ne $formatted) {
+                $drift += $file
+            }
+        }
+    }
+    finally {
+        if (Test-Path $tmpRoot) {
+            Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $drift
+}
+
 Push-Location (Join-Path $PSScriptRoot "..")
 try {
     Step "go mod verify"
@@ -37,12 +76,12 @@ try {
     go vet ./...
     if ($LASTEXITCODE -ne 0) { throw "go vet failed" }
 
-    Step "gofmt -s -d ."
-    $drift = & gofmt -s -d .
-    if ($LASTEXITCODE -ne 0) { throw "gofmt failed to run" }
-    if ($drift) {
-        Write-Host "gofmt drift detected:"
-        Write-Host $drift
+    Step "gofmt -s -d tracked Go files"
+    $goFiles = @(TrackedGoFiles)
+    $drift = @(GofmtDriftFiles $goFiles)
+    if ($drift.Count -gt 0) {
+        Write-Host "gofmt drift detected in:"
+        $drift | ForEach-Object { Write-Host $_ }
         throw "gofmt drift"
     }
 
