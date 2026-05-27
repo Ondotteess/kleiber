@@ -57,6 +57,7 @@ lint: vet ## Run gofmt check, staticcheck, golangci-lint (skip silently if missi
 	trap 'rm -rf "$$tmp"' EXIT; \
 	drift=; \
 	for file in $$(git ls-files '*.go'); do \
+	    [ -f "$$file" ] || continue; \
 	    orig="$$tmp/orig/$$file"; fmt="$$tmp/fmt/$$file"; \
 	    mkdir -p "$$(dirname "$$orig")" "$$(dirname "$$fmt")"; \
 	    sed 's/\r$$//' "$$file" > "$$orig"; \

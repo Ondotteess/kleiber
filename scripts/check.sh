@@ -30,9 +30,11 @@ have_cgo_toolchain() {
 }
 
 tracked_go_files() {
-    # Check only tracked files; ignored caches such as .gomodcache may contain
-    # dependency testdata that is not part of this repository's formatting contract.
-    git ls-files '*.go'
+    # Check only existing tracked files; ignored caches such as .gomodcache may
+    # contain dependency testdata, and tracked-but-deleted paths can exist before commit.
+    git ls-files '*.go' | while IFS= read -r file; do
+        [ -f "$file" ] && printf '%s\n' "$file"
+    done
 }
 
 gofmt_drift_files() {

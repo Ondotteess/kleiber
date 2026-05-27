@@ -24,9 +24,9 @@ function HaveCgoToolchain {
 }
 
 function TrackedGoFiles {
-    # Check only tracked files; ignored caches such as .gomodcache may contain
-    # dependency testdata that is not part of this repository's formatting contract.
-    $files = @(git ls-files '*.go')
+    # Check only existing tracked files; ignored caches such as .gomodcache may
+    # contain dependency testdata, and tracked-but-deleted paths can exist before commit.
+    $files = @(git ls-files '*.go' | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
     if ($LASTEXITCODE -ne 0) { throw "git ls-files failed" }
     return $files
 }

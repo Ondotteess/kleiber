@@ -316,6 +316,50 @@ func TestPackagesSnapshot_IndependentMutation(t *testing.T) {
 	}
 }
 
+func TestProject_Snapshot_DefensiveCopies(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "a.go")
+	test := filepath.Join(root, "a_test.go")
+	p := &Project{
+		root: root,
+		modules: []Module{{
+			Path:      "example.test/snap",
+			Dir:       root,
+			GoMod:     filepath.Join(root, "go.mod"),
+			GoVersion: "1.25",
+		}},
+		packages: []Package{{
+			ImportPath: "example.test/snap",
+			Dir:        root,
+			Files:      []string{src},
+			TestFiles:  []string{test},
+		}},
+	}
+
+	snap := p.Snapshot()
+	if snap.Root != root {
+		t.Fatalf("Snapshot.Root = %q, want %q", snap.Root, root)
+	}
+	snap.Modules[0].Path = "mutated"
+	snap.Packages[0].ImportPath = "mutated"
+	snap.Packages[0].Files[0] = "mutated.go"
+	snap.Packages[0].TestFiles[0] = "mutated_test.go"
+
+	next := p.Snapshot()
+	if next.Modules[0].Path != "example.test/snap" {
+		t.Errorf("module path mutated through snapshot: %q", next.Modules[0].Path)
+	}
+	if next.Packages[0].ImportPath != "example.test/snap" {
+		t.Errorf("package path mutated through snapshot: %q", next.Packages[0].ImportPath)
+	}
+	if next.Packages[0].Files[0] != src {
+		t.Errorf("source file mutated through snapshot: %q", next.Packages[0].Files[0])
+	}
+	if next.Packages[0].TestFiles[0] != test {
+		t.Errorf("test file mutated through snapshot: %q", next.Packages[0].TestFiles[0])
+	}
+}
+
 func hasPackage(pkgs []Package, importPath string) bool {
 	for _, pkg := range pkgs {
 		if pkg.ImportPath == importPath {

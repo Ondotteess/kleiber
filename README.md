@@ -6,14 +6,14 @@ Kleiber is an AI-native IDE for Go, written in Go. It treats concurrency, idioms
 > See [`docs/product/roadmap.md`](docs/product/roadmap.md) for the full milestone plan and
 > [`docs/product/vision.md`](docs/product/vision.md) for the product story.
 
-## Development status (2026-05-26)
+## Development status (2026-05-27)
 
 - [x] Documentation: vision, market analysis, architecture, agent protocol, contributing guides
 - [x] Phase 0 — Repo bootstrap: Go module, build scripts, CI, package skeletons, CLI entrypoint
-- [ ] **Phase 1 — Core foundations** (in progress): JSON config, logging, typed event bus, project model with go.work multi-module package loading/manual refresh/snapshots, command dispatcher, editor/project/LSP command registrations, doctor checks
-- [ ] Phase 2 — Editor engine (in progress): buffer + undo/redo, view/cursor/selection with external-edit transform, engine-managed buffers/views, and dispatcher-backed file/buffer/view actions; syntax highlighting pending
-- [ ] Phase 3 — LSP client (in progress): gopls subprocess + LSP operations, **editor↔LSP bridge** (didOpen/Change/Close + SaveAs lifecycle + UTF-16-safe diagnostics/navigation routing), completions, buffer formatting, format+save, config-gated save command wiring via LSP TextEdits, and tracked document snapshot/replay foundation; auto-restart policy pending
-- [ ] Phase 4 — UI layer v1 (gioui)
+- [ ] **Phase 1 — Core foundations** (in progress): JSON config, logging, typed event bus, app/core composition layer with bootstrap/state snapshots, project model with go.work multi-module package loading/manual refresh/snapshots, command dispatcher, editor/project/LSP command registration, doctor checks
+- [ ] Phase 2 — Editor engine (in progress): buffer + undo/redo, view/cursor/selection with external-edit transform, engine-managed buffers/views, and app-owned dispatcher-backed file/buffer/view actions; syntax highlighting pending
+- [ ] Phase 3 — LSP client (in progress): gopls subprocess + LSP operations, **editor↔LSP bridge** (didOpen/Change/Close + SaveAs lifecycle + UTF-16-safe diagnostics/navigation routing), completions, buffer formatting, format+save capability for app-level format-on-save, and tracked document snapshot/replay foundation; auto-restart policy pending
+- [ ] Phase 4 — UI layer v1 (gioui): pure state/view-model adapter, presenter, typed action/controller, shell boundary, and a minimal read-only Gio renderer behind the `gio` build tag exist; editor widget/input pending
 - [ ] Phase 5 — Debugger & test runner (Delve via DAP, coverage, benchmarks)
 - [ ] Phase 6 — AI bridge (providers, gopls MCP, validated refactors)
 - [ ] Phase 7 — Runtime awareness (pprof, concurrency visualizer, traces)
@@ -44,6 +44,16 @@ powershell.exe -ExecutionPolicy Bypass -File .\scripts\check.ps1
 
 If your PowerShell policy already allows local scripts, `./scripts/check.ps1`
 works too.
+
+Experimental UI slice:
+
+```powershell
+go run -tags=gio ./cmd/kleiber experimental-ui [path]
+```
+
+This opens a minimal read-only Gio window over the current shell state. The
+default `kleiber` invocation still prints the pre-alpha notice; the editor
+widget, file tree interaction, and command palette interactions are pending.
 
 LSP integration tests use a real `gopls`. The normal integration lane skips
 cleanly when `gopls` is not on `PATH`; to require real LSP coverage locally:

@@ -2,7 +2,7 @@
 
 This roadmap is a living document. Dates are best-effort estimates, not commitments.
 
-Last updated: **2026-05-26**
+Last updated: **2026-05-27**
 
 ## Guiding principles
 
@@ -28,10 +28,17 @@ Current implementation checkpoint:
 - Runnable CLI surface: `kleiber --version`, `kleiber help`, and `kleiber doctor [path]`.
 - Core foundations exist for JSON config, logging, typed events, command dispatch,
   go.work-aware project/module/package loading with manual refresh, filesystem watching,
-  defensive project snapshots, editor/project/LSP command registrations,
-  editor buffers/views, config-gated save/format-on-save orchestration, and LSP bridge operations
+  defensive project snapshots, an app/core composition layer with bootstrap,
+  read-only state snapshots, user-facing editor/project command registration,
+  editor buffers/views, a pure UI state/view-model adapter, presenter boundary,
+  typed UI action/controller boundary, UI shell boundary, and a minimal
+  read-only Gio renderer behind the `gio` build tag, config-gated
+  save/format-on-save orchestration, and LSP bridge operations
   including tracked-document snapshot/replay groundwork for a future restart supervisor.
-- UI is still not usable; `internal/ui` contains only the gioui package contract from ADR-001.
+- UI is still not usable as an editor; `internal/ui` contains pure
+  state/presenter/controller/shell foundations and an experimental read-only Gio
+  window path, but no editor widget, file tree interaction, command palette
+  interaction, or production input handling.
 
 ## Milestone 2 — Debugger and Test Runner (target: Q4 2026)
 

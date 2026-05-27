@@ -20,6 +20,12 @@ This document describes Kleiber's high-level architecture, the major boundaries,
 └──────────────────────────────┬────────────────────────────────┘
                                │ commands / events
 ┌──────────────────────────────▼────────────────────────────────┐
+│                  App/Core Composition                          │
+│   Owns Session wiring, config, dispatcher registration,         │
+│   project attachment, and cross-component editor policies.      │
+└──────────────────────────────┬────────────────────────────────┘
+                               │ typed core APIs
+┌──────────────────────────────▼────────────────────────────────┐
 │                       Core (Go)                                │
 │                                                                │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐   │
@@ -47,7 +53,18 @@ This document describes Kleiber's high-level architecture, the major boundaries,
 
 Responsible for rendering panels, capturing input, dispatching commands to the core. The UI does **not** own application state — it observes the core's state and renders it.
 
-The v1 desktop UI stack is **gioui** per [`decisions.md`](decisions.md) ADR-001. As of 2026-05-26, `internal/ui` only contains the package contract; no usable editor UI is implemented yet. The core remains UI-agnostic and exposes a clear command/event API.
+The v1 desktop UI stack is **gioui** per [`decisions.md`](decisions.md) ADR-001. As of 2026-05-27, `internal/ui` contains a pure state/view-model adapter that converts `app.Session` snapshots into UI-ready command, buffer, view, and project models, a presenter that tracks current state and emits coalesced update signals after editor events, a typed controller that maps future UI intents onto app-owned mutation commands, a shell boundary future windows can drive, and a minimal read-only Gio renderer/window loop behind the `gio` build tag. No usable editor UI is implemented yet: no editor widget, command palette interaction, file tree interaction, or production input handling exists. The default binary remains an informational pre-alpha CLI; `kleiber experimental-ui [path]` is the explicit experimental path for builds compiled with `-tags=gio`. The core remains UI-agnostic and exposes a clear command/event API.
+
+### App/Core Composition
+
+`internal/app` is the UI-ready composition layer. A `Session` wires config,
+the command dispatcher, editor engine, optional project model, and optional LSP
+formatting capability without starting a UI or gopls subprocess. It owns
+user-facing editor/project command registration, cross-component policies such
+as config-gated format-on-save, and read-only state snapshots for command
+palette, buffers, views, and project metadata. `NewDefaultSession` is the
+bootstrap boundary future UI code can call to load config, build the logger and
+core services, optionally open a project root, and register commands.
 
 ### Editor Engine
 
@@ -68,13 +85,13 @@ Current implementation parses `go.mod` / root-level `go.work` via `golang.org/x/
 
 ### Command Dispatcher
 
-Translates user input (keyboard, mouse, command palette) into structured commands. The implemented dispatcher is a concurrent-safe registry with `Register`, `Unregister`, `Dispatch`, `Palette`, `Has`, and `Len`; command execution receives `context.Context` and a validated argument map. Editor-owned commands cover basic file, buffer, view, cursor, and text-edit actions; project-owned commands cover explicit metadata refresh; LSP-owned commands cover format, format+save, and config-gated save orchestration. Keybinding configuration is represented in config but not wired to a UI yet. Query/state reads currently remain direct typed API calls such as `EditorEngine.Buffers`, `Project.Snapshot`, and bridge methods until the dispatcher has a result-value contract.
+Translates user input (keyboard, mouse, command palette) into structured commands. The implemented dispatcher is a concurrent-safe registry with `Register`, `Unregister`, `Dispatch`, `Palette`, `Has`, and `Len`; command execution receives `context.Context` and a validated argument map. `internal/app.Session` registers user-facing editor commands for basic file, buffer, view, cursor, and text-edit actions plus explicit project refresh. LSP-owned commands cover LSP-specific format and format+save operations. Keybinding configuration is represented in config but not wired to a UI yet. Query/state reads currently stay out of the dispatcher return path: UI callers use `Session.CommandPalette`, `Session.Buffers`, `Session.Views`, `Session.ProjectSnapshot`, and typed bridge/project APIs until a command-result contract is designed.
 
 ### LSP Client
 
 Manages the `gopls` subprocess. Implements the LSP protocol (JSON-RPC 2.0 over stdio). Translates LSP responses into editor-friendly types.
 
-Current implementation starts/stops `gopls`, performs initialize/initialized, sends didOpen/didChange/didClose, handles version-aware diagnostics, hover, completions, definition, references, formatting, workspace/configuration, and showMessageRequest. `lsp.Bridge` connects `internal/editor` to the client, translates editor byte columns to LSP UTF-16 positions and back, preserves completion `additionalTextEdits`, applies formatting TextEdits, tracks SaveAs lifecycle changes for Go buffers, registers format/format+save plus config-gated save command wiring, and exposes a full-text tracked-document snapshot/replay boundary for future restarts. The client is still one-shot: if the connection closes, pending calls fail and callers must rebuild client+bridge. Automatic restart is deferred until a supervisor can create or attach a fresh client, replay tracked documents, reconnect diagnostics, and resume editor traffic without hiding state loss.
+Current implementation starts/stops `gopls`, performs initialize/initialized, sends didOpen/didChange/didClose, handles version-aware diagnostics, hover, completions, definition, references, formatting, workspace/configuration, and showMessageRequest. `lsp.Bridge` connects `internal/editor` to the client, translates editor byte columns to LSP UTF-16 positions and back, preserves completion `additionalTextEdits`, applies formatting TextEdits, tracks SaveAs lifecycle changes for Go buffers, registers LSP-specific format/format+save commands, and exposes a full-text tracked-document snapshot/replay boundary for future restarts. App-level save orchestration consumes the bridge as an optional formatter; the bridge no longer owns `editor.saveBuffer`. The client is still one-shot: if the connection closes, pending calls fail and callers must rebuild client+bridge. Automatic restart is deferred until a supervisor can create or attach a fresh client, replay tracked documents, reconnect diagnostics, and resume editor traffic without hiding state loss.
 
 ### AI Bridge
 
@@ -93,7 +110,7 @@ Exposes runtime data to the UI as structured events the editor can render inline
 ### Opening a file
 
 1. User clicks file in tree → UI dispatches `editor.openFile` with `path`.
-2. Command Dispatcher routes to the command owner for file opening.
+2. App-owned Command Dispatcher routes to the file-opening command.
 3. Project Model resolves package/project context for the path when needed.
 4. Editor Engine reads bytes, creates `Buffer`, registers it, and publishes `BufferOpened`.
 5. UI observes Editor Engine state/events and renders the buffer.
@@ -103,14 +120,9 @@ Exposes runtime data to the UI as structured events the editor can render inline
 ### Saving a Go file
 
 1. UI/keybinding dispatches `editor.saveBuffer`.
-2. Command-level orchestration reads `Config.Editor.FormatOnSave`.
+2. `internal/app.Session` command orchestration reads `Config.Editor.FormatOnSave`.
 3. If disabled, or the buffer is not a tracked Go document, `EditorEngine.Save` writes the file directly.
 4. If enabled for a tracked Go document, `lsp.Bridge.FormatAndSaveBuffer` requests formatting from `gopls`, applies TextEdits, then saves. Formatting errors stop before disk write.
-
-Note: `editor.saveBuffer` is currently registered by the LSP bridge package
-because format-on-save is the only cross-component save policy. Moving that
-orchestration into a future app/core composition layer is tracked as architecture
-debt; the editor engine itself remains LSP-agnostic.
 
 ### AI-assisted refactor
 

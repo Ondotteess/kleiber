@@ -4,6 +4,61 @@ This document drills into each core component: responsibilities, public API, dep
 
 > Note: APIs below are sketches subject to change until Milestone 1 closes.
 
+## App/Core Composition
+
+**Package:** `internal/app`
+
+**Responsibility:** Compose core services for UI/keybinding/command-palette callers without importing UI code.
+
+**Public API (sketch):**
+```go
+type Options struct {
+    Config     *config.Config
+    Dispatcher *commands.Dispatcher
+    Editor     *editor.EditorEngine
+    Project    *project.Project
+    Formatter  BufferFormatter
+}
+
+type Session struct {
+    CommandPalette() []CommandDescriptor
+    Dispatcher() *commands.Dispatcher
+    Dispatch(ctx context.Context, name string, args map[string]any) error
+    Editor() *editor.EditorEngine
+    Buffers() []editor.BufferRef
+    Views(bufferID editor.BufferID) []editor.ViewRef
+    Project() *project.Project
+    ProjectSnapshot() (project.ProjectSnapshot, bool)
+    RegisterCommands() error
+    SaveBuffer(ctx context.Context, id editor.BufferID) error
+}
+
+func NewDefaultSession(ctx context.Context, opts DefaultSessionOptions) (*Session, error)
+```
+
+**Dependencies:** `internal/config`, `internal/commands`, `internal/editor`,
+optional `internal/project`, and optional LSP formatting capability.
+
+**Status:** Implemented foundation. `NewSession` provides safe defaults for nil
+logger, config, dispatcher, and editor engine; project and formatter remain
+optional. `NewDefaultSession` is the bootstrap boundary for future UI entry
+points: it loads user config or an explicit config path, builds the logger,
+creates core defaults, optionally opens a project root, and registers app-owned
+commands once without starting UI or gopls. `Session.RegisterCommands` owns
+user-facing editor commands
+(`editor.openFile`, `editor.newBuffer`, `editor.closeBuffer`,
+`editor.saveBuffer`, `editor.saveAsBuffer`, `editor.newView`,
+`editor.closeView`, `editor.moveCursor`, `editor.insertText`,
+`editor.backspace`, `editor.deleteSelection`) plus `project.refresh`.
+`editor.saveBuffer` now lives here and applies `Config.Editor.FormatOnSave`:
+plain save when disabled or when no formatter/tracked Go document exists, and
+formatter-backed save when enabled for Go buffers. Formatting errors prevent
+disk writes. Read-only state APIs provide defensive snapshots for the command
+palette, editor buffers, editor views, config, and optional project metadata.
+`Session.Dispatch` is the preferred UI-facing mutation path; raw dispatcher
+access remains available for lower-level tests and integration work. Query APIs
+remain direct typed calls; no dispatcher result-value contract exists yet.
+
 ## Editor Engine
 
 **Package:** `internal/editor`
@@ -46,12 +101,9 @@ undo/redo, observer callbacks, thread-safe buffer access, engine-managed open/sa
 dirty tracking, buffer lifecycle events, and a view/cursor/selection model
 (directed `Selection` over a `Buffer`, engine-managed `View` handles with their
 own selection events, automatic transform of selections against external buffer
-mutations and undo/redo). `internal/editor.RegisterCommands` exposes
-dispatcher-backed `editor.openFile`, `editor.newBuffer`, `editor.closeBuffer`,
-`editor.saveAsBuffer`, `editor.newView`, `editor.closeView`,
-`editor.moveCursor`, `editor.insertText`, `editor.backspace`, and
-`editor.deleteSelection` commands for future UI/keybinding callers. LSP
-integration exists through `internal/lsp.Bridge`.
+mutations and undo/redo). UI-facing command registration now belongs to
+`internal/app`, keeping the editor engine focused on editor state and file I/O.
+LSP integration exists through `internal/lsp.Bridge`.
 Not yet implemented: multi-cursor selections, syntax highlighting, and a
 production UI renderer.
 
@@ -109,11 +161,12 @@ loading, and `github.com/fsnotify/fsnotify` for recursive file watching.
 loads packages through `go/packages` for every module listed in a root `go.work`,
 exposes defensive `ProjectSnapshot`/module/package snapshots, resolves files to
 owning packages across those modules, supports manual `Refresh(ctx)` to
-atomically reload modules/packages after filesystem changes, registers
-`project.refresh` for command callers, surfaces `go/packages` per-package errors
-instead of exposing a silently broken package graph, and watches the project tree
+atomically reload modules/packages after filesystem changes, surfaces
+`go/packages` per-package errors instead of exposing a silently broken package graph,
+and watches the project tree
 while skipping hidden/vendor-like directories. Still pending: project config
 overlay, watcher-driven debounced refresh, and UI-facing file tree state.
+`project.refresh` command registration is owned by `internal/app`.
 
 ## Command Dispatcher
 
@@ -143,11 +196,12 @@ type Dispatcher interface {
 
 **Status:** Implemented foundation. `internal/commands` provides a concurrent-safe
 dispatcher, duplicate/empty/nil command validation, sorted command-palette
-snapshots, and `commands.Func` for lightweight registrations. Editor, project,
-and LSP packages register owned mutation commands without depending on a UI.
-The dispatcher intentionally remains command-only; state/query reads use typed
-component APIs until a command-result contract is designed. UI keybindings are
-not wired yet.
+snapshots, and `commands.Func` for lightweight registrations.
+`internal/app.Session` registers user-facing editor/project mutation commands
+without depending on a UI; `internal/lsp` registers LSP-specific format commands.
+The dispatcher intentionally remains command-only; state/query reads use
+`internal/app.Session` snapshot methods and typed component APIs until a
+command-result contract is designed. UI keybindings are not wired yet.
 
 ## LSP Client
 
@@ -199,11 +253,9 @@ editor byte columns, reject stale navigation, completion, and format results if
 the buffer changes mid-request, preserve completion `additionalTextEdits`, apply
 returned formatting TextEdits back into the editor buffer, and run an explicit
 format-then-save flow. The bridge registers `lsp.formatBuffer` and
-`lsp.formatAndSaveBuffer` commands for command-palette/UI callers, plus
-`editor.saveBuffer`, which uses `Config.Editor.FormatOnSave` to choose plain
-editor save or LSP format-then-save for tracked Go buffers. That save
-orchestration currently lives with the LSP bridge until a dedicated app/core
-composition layer exists. It also exposes `TrackedDocuments()` and
+`lsp.formatAndSaveBuffer` commands for command-palette/UI callers; app-level
+`editor.saveBuffer` consumes the bridge as an optional formatter for
+format-on-save. It also exposes `TrackedDocuments()` and
 `ReplayOpenDocuments(ctx)` so restart work has a tested full-text didOpen replay
 boundary. Not yet implemented: completion apply UI, code actions, automatic
 restart policy, and incremental document sync.
@@ -279,11 +331,59 @@ type Profiler interface {
 
 **Responsibility:** Render the editor and panels. Capture input. Dispatch commands.
 
-**Public API:** Depends on the gioui implementation shape (see ADR-001).
+**Public API (sketch):**
+```go
+func BuildState(session *app.Session) (State, error)
+func NewPresenter(session *app.Session, opts PresenterOptions) (*Presenter, error)
+func NewController(p *Presenter, session *app.Session, opts ControllerOptions) (*Controller, error)
+func NewShell(p *Presenter, c *Controller, opts ShellOptions) (*Shell, error)
+func BuildGioRenderModel(snapshot ShellState) GioRenderModel
+func RunGioWindow(ctx context.Context, shell *Shell, opts GioWindowOptions) error // gio build tag
 
-**Status:** Stack accepted, implementation not production-ready. ADR-001 selects
-`gioui`, and `internal/ui/doc.go` records the intended contract. No usable editor
-window, widgets, command palette, or event rendering exists yet.
+type State struct {
+    Commands []CommandItem
+    Buffers  []BufferItem
+    Views    []ViewItem
+    Project  ProjectState
+}
+
+type ShellState struct {
+    Title  string
+    State  State
+    Dirty  bool
+    Closed bool
+}
+```
+
+**Status:** State adapter, presenter, typed controller, shell foundation, and a
+minimal read-only Gio renderer/window slice are implemented. ADR-001 selects
+`gioui`, now present in `go.mod`; the actual Gio window loop is isolated behind
+the `gio` build tag so normal core checks remain available even when local Gio
+transitive dependencies or desktop graphics prerequisites are missing. The UI is
+still experimental: no editor widget, command palette interaction, file tree
+interaction, or production input handling exists.
+Implemented: `BuildState(session)` converts `internal/app.Session` snapshots
+into pure view-model data for commands, buffers, views, modules, packages, and
+files using deterministic sorting and defensive slices. `Presenter` owns the
+current `State`, can rebuild it on demand via `Refresh(ctx)`, subscribes to
+editor events through app-owned accessors, and emits buffered/coalesced update
+signals so future UI renderers can decide when to repaint without blocking
+editor mutations. `Controller` provides typed action methods such as
+`OpenFile`, `NewBuffer`, `SaveBuffer`, `SaveAsBuffer`, `NewView`,
+`CloseView`, text-edit actions, and `RefreshProject`; these dispatch through
+`app.Session.Dispatch` instead of mutating editor or project state directly.
+Project refresh currently has no event source, so the controller explicitly
+refreshes presenter state and emits a repaint signal after a successful
+`project.refresh`. `Shell` composes `Presenter` and `Controller`, exposes
+defensive state snapshots, update signals, explicit refresh, dirty status, and
+idempotent close semantics as the handoff point for a future window/render loop.
+`BuildGioRenderModel` maps shell snapshots to a testable read-only render model,
+and the `gio` build provides `RunGioWindow` plus a minimal layout showing the app
+title, command summary, buffers, project modules/packages, and an "editor widget
+pending" marker. The UI package does not expose executable command objects,
+perform I/O outside underlying app commands, or cache mutable pointers. The
+dispatcher remains command-only and returns only errors; query/state reads still
+go through app/session snapshots and the UI read model.
 
 ## Storage / Config
 

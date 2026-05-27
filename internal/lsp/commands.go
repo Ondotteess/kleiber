@@ -9,7 +9,6 @@ import (
 	"strconv"
 
 	"github.com/Ondotteess/kleiber/internal/commands"
-	"github.com/Ondotteess/kleiber/internal/config"
 	"github.com/Ondotteess/kleiber/internal/editor"
 )
 
@@ -21,10 +20,6 @@ const (
 	// CommandFormatAndSaveBuffer formats an already-open editor buffer
 	// through the LSP bridge, then saves it to disk.
 	CommandFormatAndSaveBuffer = "lsp.formatAndSaveBuffer"
-
-	// CommandSaveBuffer saves an editor buffer, optionally formatting
-	// tracked Go buffers through the LSP bridge when config enables it.
-	CommandSaveBuffer = "editor.saveBuffer"
 )
 
 var (
@@ -35,10 +30,6 @@ var (
 	// ErrCommandBridgeNil is returned when command registration is
 	// attempted without an LSP bridge.
 	ErrCommandBridgeNil = errors.New("lsp: command bridge is nil")
-
-	// ErrCommandEngineNil is returned when command registration is
-	// attempted without an editor engine.
-	ErrCommandEngineNil = errors.New("lsp: command editor engine is nil")
 
 	// ErrCommandMissingArg is returned when a command argument is required
 	// but absent.
@@ -83,60 +74,6 @@ func RegisterBridgeCommands(d *commands.Dispatcher, bridge *Bridge) error {
 			return err
 		},
 	})
-}
-
-// RegisterSaveCommand registers the editor save command. The command uses
-// config.Editor.FormatOnSave to decide whether a tracked .go buffer should
-// go through LSP formatting before the editor engine writes it to disk.
-func RegisterSaveCommand(d *commands.Dispatcher, engine *editor.EditorEngine, bridge *Bridge, cfg config.Config) error {
-	if d == nil {
-		return ErrCommandDispatcherNil
-	}
-	if engine == nil {
-		return ErrCommandEngineNil
-	}
-	return d.Register(commands.Func{
-		NameStr:        CommandSaveBuffer,
-		DescriptionStr: "Save buffer",
-		Fn: func(ctx context.Context, args map[string]any) error {
-			id, err := bufferIDArg(args, "bufferID")
-			if err != nil {
-				return err
-			}
-			return SaveBuffer(ctx, engine, bridge, cfg, id)
-		},
-	})
-}
-
-// SaveBuffer saves id through the narrow command-level orchestration used by
-// UI/keybinding callers. The editor engine remains LSP-agnostic: when
-// format-on-save is disabled, or the buffer is not a tracked Go document, this
-// is just engine.Save. When enabled for a tracked Go buffer, formatting errors
-// prevent the save by delegating to Bridge.FormatAndSaveBuffer.
-func SaveBuffer(ctx context.Context, engine *editor.EditorEngine, bridge *Bridge, cfg config.Config, id editor.BufferID) error {
-	if engine == nil {
-		return ErrCommandEngineNil
-	}
-	if !cfg.Editor.FormatOnSave {
-		return engine.Save(ctx, id)
-	}
-
-	path, err := engine.Path(id)
-	if err != nil {
-		return err
-	}
-	if path == "" || !isGoFile(path) {
-		return engine.Save(ctx, id)
-	}
-	if bridge == nil || bridge.uriFor(id) == "" {
-		return engine.Save(ctx, id)
-	}
-
-	_, err = bridge.FormatAndSaveBuffer(ctx, id, FormattingOptions{
-		TabSize:      cfg.Editor.TabSize,
-		InsertSpaces: cfg.Editor.InsertSpaces,
-	})
-	return err
 }
 
 func formatCommandArgs(args map[string]any) (editor.BufferID, FormattingOptions, error) {

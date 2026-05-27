@@ -1,4 +1,4 @@
-package editor
+package app
 
 import (
 	"context"
@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"strconv"
 
 	"github.com/Ondotteess/kleiber/internal/commands"
+	"github.com/Ondotteess/kleiber/internal/editor"
+	"github.com/Ondotteess/kleiber/internal/lsp"
 )
 
 const (
@@ -20,6 +23,9 @@ const (
 
 	// CommandCloseBuffer closes an editor buffer.
 	CommandCloseBuffer = "editor.closeBuffer"
+
+	// CommandSaveBuffer saves an editor buffer through app-level policy.
+	CommandSaveBuffer = "editor.saveBuffer"
 
 	// CommandSaveAsBuffer writes a buffer to a caller-supplied path.
 	CommandSaveAsBuffer = "editor.saveAsBuffer"
@@ -41,46 +47,60 @@ const (
 
 	// CommandDeleteSelection deletes a view's current selection.
 	CommandDeleteSelection = "editor.deleteSelection"
+
+	// CommandProjectRefresh reloads project module/package metadata from disk.
+	CommandProjectRefresh = "project.refresh"
 )
 
 var (
+	// ErrCommandSessionNil is returned when command registration is attempted
+	// without a session.
+	ErrCommandSessionNil = errors.New("app: command session is nil")
+
 	// ErrCommandDispatcherNil is returned when command registration is
 	// attempted without a dispatcher.
-	ErrCommandDispatcherNil = errors.New("editor: command dispatcher is nil")
+	ErrCommandDispatcherNil = errors.New("app: command dispatcher is nil")
 
-	// ErrCommandEngineNil is returned when command registration is attempted
-	// without an editor engine.
-	ErrCommandEngineNil = errors.New("editor: command engine is nil")
+	// ErrCommandEditorNil is returned when editor command execution has no
+	// editor engine available.
+	ErrCommandEditorNil = errors.New("app: command editor is nil")
+
+	// ErrCommandProjectNil is returned when project command execution has no
+	// project attached to the session.
+	ErrCommandProjectNil = errors.New("app: command project is nil")
 
 	// ErrCommandMissingArg is returned when a command argument is required but
 	// absent.
-	ErrCommandMissingArg = errors.New("editor: command missing argument")
+	ErrCommandMissingArg = errors.New("app: command missing argument")
 
 	// ErrCommandInvalidArg is returned when a command argument has the wrong
 	// type or value.
-	ErrCommandInvalidArg = errors.New("editor: command invalid argument")
+	ErrCommandInvalidArg = errors.New("app: command invalid argument")
 )
 
-// RegisterCommands registers editor-owned commands with d. These commands only
-// mutate editor state; query/state reads remain direct EditorEngine calls until
-// the dispatcher grows a result API.
-func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
-	if d == nil {
-		return ErrCommandDispatcherNil
+// RegisterCommands registers app-owned mutation commands with the session's
+// dispatcher. State/query reads remain typed APIs until the dispatcher grows a
+// result-value contract.
+func (s *Session) RegisterCommands() error {
+	if s == nil {
+		return ErrCommandSessionNil
 	}
-	if engine == nil {
-		return ErrCommandEngineNil
+	if s.dispatcher == nil {
+		return ErrCommandDispatcherNil
 	}
 	for _, cmd := range []commands.Command{
 		commands.Func{
 			NameStr:        CommandOpenFile,
 			DescriptionStr: "Open file",
 			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
 				path, err := requiredStringArg(args, "path")
 				if err != nil {
 					return err
 				}
-				_, err = engine.Open(ctx, path)
+				_, err = s.editor.Open(ctx, path)
 				return err
 			},
 		},
@@ -88,6 +108,9 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 			NameStr:        CommandNewBuffer,
 			DescriptionStr: "Create untitled buffer",
 			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -95,7 +118,7 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 				if err != nil {
 					return err
 				}
-				engine.NewBuffer(text)
+				s.editor.NewBuffer(text)
 				return nil
 			},
 		},
@@ -103,21 +126,38 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 			NameStr:        CommandCloseBuffer,
 			DescriptionStr: "Close buffer",
 			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				id, err := bufferIDCommandArg(args, "bufferID")
+				id, err := bufferIDArg(args, "bufferID")
 				if err != nil {
 					return err
 				}
-				return engine.Close(id)
+				return s.editor.Close(id)
+			},
+		},
+		commands.Func{
+			NameStr:        CommandSaveBuffer,
+			DescriptionStr: "Save buffer",
+			Fn: func(ctx context.Context, args map[string]any) error {
+				id, err := bufferIDArg(args, "bufferID")
+				if err != nil {
+					return err
+				}
+				return s.SaveBuffer(ctx, id)
 			},
 		},
 		commands.Func{
 			NameStr:        CommandSaveAsBuffer,
 			DescriptionStr: "Save buffer as",
 			Fn: func(ctx context.Context, args map[string]any) error {
-				id, err := bufferIDCommandArg(args, "bufferID")
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
+				id, err := bufferIDArg(args, "bufferID")
 				if err != nil {
 					return err
 				}
@@ -125,21 +165,24 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 				if err != nil {
 					return err
 				}
-				return engine.SaveAs(ctx, id, path)
+				return s.editor.SaveAs(ctx, id, path)
 			},
 		},
 		commands.Func{
 			NameStr:        CommandNewView,
 			DescriptionStr: "Create view",
 			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				id, err := bufferIDCommandArg(args, "bufferID")
+				id, err := bufferIDArg(args, "bufferID")
 				if err != nil {
 					return err
 				}
-				_, err = engine.NewView(id)
+				_, err = s.editor.NewView(id)
 				return err
 			},
 		},
@@ -147,32 +190,38 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 			NameStr:        CommandCloseView,
 			DescriptionStr: "Close view",
 			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				id, err := viewIDCommandArg(args, "viewID")
+				id, err := viewIDArg(args, "viewID")
 				if err != nil {
 					return err
 				}
-				return engine.CloseView(id)
+				return s.editor.CloseView(id)
 			},
 		},
 		commands.Func{
 			NameStr:        CommandMoveCursor,
 			DescriptionStr: "Move cursor",
 			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				vid, line, column, extend, err := moveCursorCommandArgs(args)
+				vid, line, column, extend, err := moveCursorArgs(args)
 				if err != nil {
 					return err
 				}
-				view, err := engine.View(vid)
+				view, err := s.editor.View(vid)
 				if err != nil {
 					return err
 				}
-				pos := Position{Line: line, Column: column}
+				pos := editor.Position{Line: line, Column: column}
 				if extend {
 					return view.MoveCursorTo(pos)
 				}
@@ -183,10 +232,13 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 			NameStr:        CommandInsertText,
 			DescriptionStr: "Insert text",
 			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				vid, err := viewIDCommandArg(args, "viewID")
+				vid, err := viewIDArg(args, "viewID")
 				if err != nil {
 					return err
 				}
@@ -194,7 +246,7 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 				if err != nil {
 					return err
 				}
-				view, err := engine.View(vid)
+				view, err := s.editor.View(vid)
 				if err != nil {
 					return err
 				}
@@ -206,14 +258,17 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 			NameStr:        CommandBackspace,
 			DescriptionStr: "Backspace",
 			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				vid, err := viewIDCommandArg(args, "viewID")
+				vid, err := viewIDArg(args, "viewID")
 				if err != nil {
 					return err
 				}
-				view, err := engine.View(vid)
+				view, err := s.editor.View(vid)
 				if err != nil {
 					return err
 				}
@@ -225,14 +280,17 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 			NameStr:        CommandDeleteSelection,
 			DescriptionStr: "Delete selection",
 			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.editor == nil {
+					return ErrCommandEditorNil
+				}
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				vid, err := viewIDCommandArg(args, "viewID")
+				vid, err := viewIDArg(args, "viewID")
 				if err != nil {
 					return err
 				}
-				view, err := engine.View(vid)
+				view, err := s.editor.View(vid)
 				if err != nil {
 					return err
 				}
@@ -240,16 +298,59 @@ func RegisterCommands(d *commands.Dispatcher, engine *EditorEngine) error {
 				return err
 			},
 		},
+		commands.Func{
+			NameStr:        CommandProjectRefresh,
+			DescriptionStr: "Refresh project metadata",
+			Fn: func(ctx context.Context, args map[string]any) error {
+				if s.project == nil {
+					return ErrCommandProjectNil
+				}
+				return s.project.Refresh(ctx)
+			},
+		},
 	} {
-		if err := d.Register(cmd); err != nil {
+		if err := s.dispatcher.Register(cmd); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func moveCursorCommandArgs(args map[string]any) (ViewID, int, int, bool, error) {
-	vid, err := viewIDCommandArg(args, "viewID")
+// SaveBuffer saves id through app-level orchestration. The editor engine stays
+// LSP-agnostic: format-on-save delegates to the optional formatter only for Go
+// buffers, and untracked documents fall back to plain save.
+func (s *Session) SaveBuffer(ctx context.Context, id editor.BufferID) error {
+	if s == nil || s.editor == nil {
+		return ErrCommandEditorNil
+	}
+	if !s.cfg.Editor.FormatOnSave {
+		return s.editor.Save(ctx, id)
+	}
+
+	path, err := s.editor.Path(id)
+	if err != nil {
+		return err
+	}
+	if path == "" || !isGoFile(path) || s.formatter == nil {
+		return s.editor.Save(ctx, id)
+	}
+
+	_, err = s.formatter.FormatAndSaveBuffer(ctx, id, lsp.FormattingOptions{
+		TabSize:      s.cfg.Editor.TabSize,
+		InsertSpaces: s.cfg.Editor.InsertSpaces,
+	})
+	if errors.Is(err, lsp.ErrBridgeDocumentNotTracked) {
+		return s.editor.Save(ctx, id)
+	}
+	return err
+}
+
+func isGoFile(path string) bool {
+	return filepath.Ext(path) == ".go"
+}
+
+func moveCursorArgs(args map[string]any) (editor.ViewID, int, int, bool, error) {
+	vid, err := viewIDArg(args, "viewID")
 	if err != nil {
 		return 0, 0, 0, false, err
 	}
@@ -268,12 +369,12 @@ func moveCursorCommandArgs(args map[string]any) (ViewID, int, int, bool, error) 
 	return vid, line, column, extend, nil
 }
 
-func bufferIDCommandArg(args map[string]any, name string) (BufferID, error) {
+func bufferIDArg(args map[string]any, name string) (editor.BufferID, error) {
 	raw, err := requiredArg(args, name)
 	if err != nil {
 		return 0, err
 	}
-	if id, ok := raw.(BufferID); ok {
+	if id, ok := raw.(editor.BufferID); ok {
 		if id <= 0 {
 			return 0, fmt.Errorf("%w: %s=%d", ErrCommandInvalidArg, name, id)
 		}
@@ -286,15 +387,15 @@ func bufferIDCommandArg(args map[string]any, name string) (BufferID, error) {
 	if n <= 0 {
 		return 0, fmt.Errorf("%w: %s=%d", ErrCommandInvalidArg, name, n)
 	}
-	return BufferID(n), nil
+	return editor.BufferID(n), nil
 }
 
-func viewIDCommandArg(args map[string]any, name string) (ViewID, error) {
+func viewIDArg(args map[string]any, name string) (editor.ViewID, error) {
 	raw, err := requiredArg(args, name)
 	if err != nil {
 		return 0, err
 	}
-	if id, ok := raw.(ViewID); ok {
+	if id, ok := raw.(editor.ViewID); ok {
 		if id <= 0 {
 			return 0, fmt.Errorf("%w: %s=%d", ErrCommandInvalidArg, name, id)
 		}
@@ -307,7 +408,7 @@ func viewIDCommandArg(args map[string]any, name string) (ViewID, error) {
 	if n <= 0 {
 		return 0, fmt.Errorf("%w: %s=%d", ErrCommandInvalidArg, name, n)
 	}
-	return ViewID(n), nil
+	return editor.ViewID(n), nil
 }
 
 func nonNegativeIntArg(args map[string]any, name string) (int, error) {
