@@ -350,18 +350,32 @@ type State struct {
 type ShellState struct {
     Title  string
     State  State
+    Palette CommandPaletteSnapshot
     Dirty  bool
     Closed bool
+}
+
+type CommandPaletteSnapshot struct {
+    Open          bool
+    SelectedIndex int
+    Commands      []CommandItem
 }
 ```
 
 **Status:** State adapter, presenter, typed controller, shell foundation, and a
 minimal read-only Gio renderer/window slice are implemented. ADR-001 selects
 `gioui`, now present in `go.mod`; the actual Gio window loop is isolated behind
-the `gio` build tag so normal core checks remain available even when local Gio
-transitive dependencies or desktop graphics prerequisites are missing. The UI is
-still experimental: no editor widget, command palette interaction, file tree
-interaction, or production input handling exists.
+the `gio` build tag so normal core checks remain lightweight. The
+`cmd/kleiber` Gio launcher owns the required `gioapp.Main()` call while
+`internal/ui` owns only the window event loop and render model, and default
+builds reject window mode before opening a project. The
+`kleiber experimental-ui --smoke [path]` command is a no-window verification path
+that builds the app session, shell, and render model, prints a deterministic
+summary, and does not require `-tags=gio` or start `gopls`. Manual native-window verification is tracked in
+[`docs/contributing/gio-smoke.md`](../contributing/gio-smoke.md), which defines
+the expected visual sections, close behavior, and failure-capture steps. The UI
+is still experimental: no editor widget, file tree interaction, palette command
+execution, or production input handling exists.
 Implemented: `BuildState(session)` converts `internal/app.Session` snapshots
 into pure view-model data for commands, buffers, views, modules, packages, and
 files using deterministic sorting and defensive slices. `Presenter` owns the
@@ -377,10 +391,23 @@ refreshes presenter state and emits a repaint signal after a successful
 `project.refresh`. `Shell` composes `Presenter` and `Controller`, exposes
 defensive state snapshots, update signals, explicit refresh, dirty status, and
 idempotent close semantics as the handoff point for a future window/render loop.
-`BuildGioRenderModel` maps shell snapshots to a testable read-only render model,
-and the `gio` build provides `RunGioWindow` plus a minimal layout showing the app
-title, command summary, buffers, project modules/packages, and an "editor widget
-pending" marker. The UI package does not expose executable command objects,
+`BuildGioRenderModel` maps shell snapshots to a testable read-only render model
+with header, project, buffers, commands, and editor-placeholder sections plus
+clear empty states. The `gio` build provides `RunGioWindow` and a minimal
+sectioned layout showing the app title, read-only/pre-alpha status, command
+summary, project modules/packages/files, buffers, and "editor widget pending"
+markers. It also handles bounded window-level shortcuts: `F5` / `Ctrl+R` /
+`Command+R` schedule a coalesced shell state refresh outside the Gio frame/key
+event path, `Ctrl+P` / `Command+P` open the command-palette shell, Up/Down move
+palette selection with wraparound, Enter is a documented no-op while palette
+command execution remains pending, and `Ctrl+Q` / `Command+Q` / `Escape`
+request a clean native-window close when the palette is not consuming Escape.
+If the palette is open, Escape closes it before it can quit the window. Because
+`gioapp.Main()` may block forever on desktop platforms, the cmd-owned Gio
+lifecycle maps a completed window loop to a controlled process exit after
+reporting any window error or recovered runner panic; `internal/ui` does not own
+process exit. Refresh errors are surfaced in the render model instead of being
+silently swallowed. The UI package does not expose executable command objects,
 perform I/O outside underlying app commands, or cache mutable pointers. The
 dispatcher remains command-only and returns only errors; query/state reads still
 go through app/session snapshots and the UI read model.

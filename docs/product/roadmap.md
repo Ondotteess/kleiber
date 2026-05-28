@@ -32,13 +32,16 @@ Current implementation checkpoint:
   read-only state snapshots, user-facing editor/project command registration,
   editor buffers/views, a pure UI state/view-model adapter, presenter boundary,
   typed UI action/controller boundary, UI shell boundary, and a minimal
-  read-only Gio renderer behind the `gio` build tag, config-gated
+  sectioned read-only Gio renderer behind the `gio` build tag, config-gated
   save/format-on-save orchestration, and LSP bridge operations
   including tracked-document snapshot/replay groundwork for a future restart supervisor.
 - UI is still not usable as an editor; `internal/ui` contains pure
   state/presenter/controller/shell foundations and an experimental read-only Gio
-  window path, but no editor widget, file tree interaction, command palette
-  interaction, or production input handling.
+  window path plus no-window smoke/model verification, but no editor widget,
+  file tree interaction, palette command execution, or production input
+  handling. The Gio window has a bounded command-palette shell for open/close
+  and keyboard selection navigation. Manual native-window visual smoke is documented in
+  `docs/contributing/gio-smoke.md`.
 
 ## Milestone 2 — Debugger and Test Runner (target: Q4 2026)
 

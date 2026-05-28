@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	gioapp "gioui.org/app"
+	"gioui.org/io/key"
 	"gioui.org/io/system"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -60,11 +61,24 @@ func (r *GioRenderer) LayoutModel(gtx layout.Context, model GioRenderModel) layo
 	return layout.UniformInset(unit.Dp(18)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return material.List(r.theme, &r.list).Layout(gtx, len(model.Lines), func(gtx layout.Context, index int) layout.Dimensions {
 			line := model.Lines[index]
-			return layout.Inset{Bottom: unit.Dp(6)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return r.lineInset(line).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				return r.layoutLine(gtx, line)
 			})
 		})
 	})
+}
+
+func (r *GioRenderer) lineInset(line GioRenderLine) layout.Inset {
+	switch line.Role {
+	case GioRenderLineTitle:
+		return layout.Inset{Bottom: unit.Dp(8)}
+	case GioRenderLineStatus:
+		return layout.Inset{Bottom: unit.Dp(12)}
+	case GioRenderLineSection:
+		return layout.Inset{Top: unit.Dp(12), Bottom: unit.Dp(4)}
+	default:
+		return layout.Inset{Bottom: unit.Dp(4)}
+	}
 }
 
 func (r *GioRenderer) layoutLine(gtx layout.Context, line GioRenderLine) layout.Dimensions {
@@ -72,6 +86,10 @@ func (r *GioRenderer) layoutLine(gtx layout.Context, line GioRenderLine) layout.
 	case GioRenderLineTitle:
 		label := material.H5(r.theme, line.Text)
 		label.Color = color.NRGBA{R: 34, G: 39, B: 46, A: 255}
+		return label.Layout(gtx)
+	case GioRenderLineStatus:
+		label := material.Body1(r.theme, line.Text)
+		label.Color = color.NRGBA{R: 72, G: 84, B: 96, A: 255}
 		return label.Layout(gtx)
 	case GioRenderLineSection:
 		label := material.Subtitle1(r.theme, line.Text)
@@ -124,7 +142,12 @@ func RunGioWindow(ctx context.Context, shell *Shell, opts GioWindowOptions) erro
 	var ops op.Ops
 
 	stopUpdates, waitUpdates := watchGioUpdates(ctx, w, shell.Updates())
+	refresher, err := NewWindowRefreshScheduler(shell, w.Invalidate)
+	if err != nil {
+		return err
+	}
 	defer func() {
+		refresher.Close()
 		close(stopUpdates)
 		waitUpdates()
 	}()
@@ -139,12 +162,81 @@ func RunGioWindow(ctx context.Context, shell *Shell, opts GioWindowOptions) erro
 			}
 			return nil
 		case gioapp.FrameEvent:
-			if shell.Dirty() {
-				_ = shell.Refresh(ctx)
-			}
 			gtx := gioapp.NewContext(&ops, event)
-			renderer.Layout(gtx)
+			quit, err := handleGioWindowActions(ctx, w, shell, refresher, gtx)
+			if err != nil {
+				return err
+			}
+			if quit {
+				continue
+			}
+			if shell.Dirty() {
+				refresher.Request(ctx)
+			}
+			renderer.LayoutSnapshot(gtx, snapshotWithRefreshError(shell, refresher))
 			event.Frame(&ops)
+		}
+	}
+}
+
+func (r *GioRenderer) LayoutSnapshot(gtx layout.Context, snapshot ShellState) layout.Dimensions {
+	if r == nil || r.shell == nil {
+		return layout.Dimensions{}
+	}
+	model := BuildGioRenderModel(snapshot)
+	return r.LayoutModel(gtx, model)
+}
+
+func snapshotWithRefreshError(shell *Shell, refresher *WindowRefreshScheduler) ShellState {
+	snapshot := shell.Snapshot()
+	if err := refresher.LastError(); err != nil {
+		snapshot.RefreshError = err.Error()
+	}
+	return snapshot
+}
+
+func handleGioWindowActions(ctx context.Context, w *gioapp.Window, shell *Shell, refresher *WindowRefreshScheduler, gtx layout.Context) (bool, error) {
+	for {
+		ev, ok := gtx.Event(
+			key.Filter{Name: key.NameF5},
+			key.Filter{Name: key.NameEscape},
+			key.Filter{Name: key.NameUpArrow},
+			key.Filter{Name: key.NameDownArrow},
+			key.Filter{Name: key.NameReturn},
+			key.Filter{Name: key.NameEnter},
+			key.Filter{Name: key.Name("P"), Required: key.ModCtrl},
+			key.Filter{Name: key.Name("P"), Required: key.ModCommand},
+			key.Filter{Name: key.Name("R"), Required: key.ModCtrl},
+			key.Filter{Name: key.Name("R"), Required: key.ModCommand},
+			key.Filter{Name: key.Name("Q"), Required: key.ModCtrl},
+			key.Filter{Name: key.Name("Q"), Required: key.ModCommand},
+		)
+		if !ok {
+			return false, nil
+		}
+		keyEvent, ok := ev.(key.Event)
+		if !ok {
+			continue
+		}
+		paletteOpen := shell != nil && shell.Snapshot().Palette.Open
+		result, err := HandleWindowAction(ctx, shell, windowActionFromGioKey(keyEvent, paletteOpen))
+		if err != nil {
+			return false, err
+		}
+		if result.PaletteChanged && w != nil {
+			w.Invalidate()
+		}
+		if result.RefreshRequested && refresher != nil {
+			refresher.Request(ctx)
+		}
+		if result.Quit {
+			if refresher != nil {
+				refresher.Close()
+			}
+			if w != nil {
+				w.Perform(system.ActionClose)
+			}
+			return true, nil
 		}
 	}
 }

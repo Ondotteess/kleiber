@@ -13,7 +13,7 @@ Kleiber is an AI-native IDE for Go, written in Go. It treats concurrency, idioms
 - [ ] **Phase 1 — Core foundations** (in progress): JSON config, logging, typed event bus, app/core composition layer with bootstrap/state snapshots, project model with go.work multi-module package loading/manual refresh/snapshots, command dispatcher, editor/project/LSP command registration, doctor checks
 - [ ] Phase 2 — Editor engine (in progress): buffer + undo/redo, view/cursor/selection with external-edit transform, engine-managed buffers/views, and app-owned dispatcher-backed file/buffer/view actions; syntax highlighting pending
 - [ ] Phase 3 — LSP client (in progress): gopls subprocess + LSP operations, **editor↔LSP bridge** (didOpen/Change/Close + SaveAs lifecycle + UTF-16-safe diagnostics/navigation routing), completions, buffer formatting, format+save capability for app-level format-on-save, and tracked document snapshot/replay foundation; auto-restart policy pending
-- [ ] Phase 4 — UI layer v1 (gioui): pure state/view-model adapter, presenter, typed action/controller, shell boundary, and a minimal read-only Gio renderer behind the `gio` build tag exist; editor widget/input pending
+- [ ] Phase 4 — UI layer v1 (gioui): pure state/view-model adapter, presenter, typed action/controller, shell boundary, minimal read-only Gio renderer, and first command-palette navigation shell behind the `gio` build tag exist; editor widget/input and palette command execution pending
 - [ ] Phase 5 — Debugger & test runner (Delve via DAP, coverage, benchmarks)
 - [ ] Phase 6 — AI bridge (providers, gopls MCP, validated refactors)
 - [ ] Phase 7 — Runtime awareness (pprof, concurrency visualizer, traces)
@@ -48,12 +48,31 @@ works too.
 Experimental UI slice:
 
 ```powershell
+go run ./cmd/kleiber experimental-ui --smoke [path]
+```
+
+This builds the app session, shell, and read-only render model, prints a concise
+summary, skips the native window, and does not require `-tags=gio`. It also does
+not start `gopls` automatically.
+
+```powershell
 go run -tags=gio ./cmd/kleiber experimental-ui [path]
 ```
 
-This opens a minimal read-only Gio window over the current shell state. The
-default `kleiber` invocation still prints the pre-alpha notice; the editor
-widget, file tree interaction, and command palette interactions are pending.
+This opens a minimal read-only Gio window over the current shell state, with
+header, project, buffers, commands, editor-placeholder sections, and bounded
+window-level shortcuts for state refresh/quit (`F5`, `Ctrl+R`, `Command+R`,
+`Ctrl+Q`, `Command+Q`, `Escape`). `Ctrl+P` / `Command+P` opens a read-only
+command-palette shell, Up/Down moves selection with wraparound, Escape closes
+the palette before quitting the window, and Enter is intentionally pending for
+execution. The default `kleiber` invocation still prints the pre-alpha
+notice, and builds without `-tags=gio` reject window mode before opening a
+project. The optional `[path]` defaults to the current directory. The editor
+widget, file tree interaction, and command execution from the palette are still
+pending; human visual smoke is still recommended for the experimental window.
+Use the manual runbook in
+[`docs/contributing/gio-smoke.md`](docs/contributing/gio-smoke.md) when checking
+the native Gio window.
 
 LSP integration tests use a real `gopls`. The normal integration lane skips
 cleanly when `gopls` is not on `PATH`; to require real LSP coverage locally:
@@ -78,6 +97,7 @@ Read these to understand **what** Kleiber is, **why** it exists, and **how** to 
 - [`docs/architecture/decisions.md`](docs/architecture/decisions.md) — Architecture Decision Records (ADRs)
 - [`docs/contributing/setup.md`](docs/contributing/setup.md) — local dev environment setup
 - [`docs/contributing/workflow.md`](docs/contributing/workflow.md) — git, PRs, reviews, releases
+- [`docs/contributing/gio-smoke.md`](docs/contributing/gio-smoke.md) — manual visual smoke for the experimental Gio window
 - [`docs/contributing/coding-standards.md`](docs/contributing/coding-standards.md) — Go style guide for this project
 - [`docs/glossary.md`](docs/glossary.md) — terminology used across the codebase and docs
 

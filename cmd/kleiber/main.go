@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +20,10 @@ import (
 	"github.com/Ondotteess/kleiber/internal/ui"
 	"github.com/Ondotteess/kleiber/pkg/version"
 )
+
+var errExperimentalUIUnavailable = errors.New("experimental-ui requires a build with -tags=gio")
+
+const experimentalUIShortcutSummary = "shortcuts: Ctrl+P/Command+P opens palette; Up/Down navigate palette; Enter pending/no-op (command execution pending); Escape closes palette before quit; F5/Ctrl+R/Command+R refresh; Ctrl+Q/Command+Q quit"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -34,7 +39,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 type runOptions struct {
-	launchUI func(context.Context, *ui.Shell, ui.GioWindowOptions, io.Writer) error
+	gioUIAvailable func() bool
+	launchUI       func(context.Context, *ui.Shell, ui.GioWindowOptions, io.Writer) error
 }
 
 func runWithOptions(args []string, stdout, stderr io.Writer, opts runOptions) error {
@@ -45,17 +51,17 @@ func runWithOptions(args []string, stdout, stderr io.Writer, opts runOptions) er
 		case "experimental-ui":
 			return runExperimentalUI(args[1:], stdout, stderr, opts)
 		case "help":
-			return runHelp(args[1:], stdout)
+			return runHelp(args[1:], stdout, opts)
 		default:
 			return fmt.Errorf("unknown subcommand %q (try `kleiber help`)", args[0])
 		}
 	}
-	return runTop(args, stdout, stderr)
+	return runTop(args, stdout, stderr, opts)
 }
 
 // runTop handles the top-level (no subcommand) invocation: flag
 // parsing for --version / -v, and otherwise the pre-alpha notice.
-func runTop(args []string, stdout, stderr io.Writer) error {
+func runTop(args []string, stdout, stderr io.Writer, opts runOptions) error {
 	fs := flag.NewFlagSet("kleiber", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
@@ -79,45 +85,64 @@ func runTop(args []string, stdout, stderr io.Writer) error {
 			"No UI yet — see docs/product/roadmap.md for milestones.\n"+
 			"Available subcommands:\n"+
 			"  kleiber doctor [path]   diagnose a Go project\n"+
-			"  kleiber experimental-ui [path]\n"+
-			"                          open the minimal read-only Gio UI\n"+
+			"  kleiber %s\n"+
 			"  kleiber help            show this message\n",
 		version.Current(),
+		experimentalUICommandLine(opts),
 	)
 	return nil
 }
 
 // runHelp prints a brief usage summary to stdout.
-func runHelp(_ []string, stdout io.Writer) error {
+func runHelp(_ []string, stdout io.Writer, opts runOptions) error {
 	fmt.Fprintf(stdout,
 		"kleiber %s\n\n"+
 			"Usage:\n"+
 			"  kleiber [--version|-v]\n"+
 			"  kleiber doctor [path]\n"+
-			"  kleiber experimental-ui [path]\n"+
+			"  kleiber %s\n"+
 			"  kleiber help\n",
 		version.Current(),
+		experimentalUICommandLine(opts),
 	)
 	return nil
 }
 
 func runExperimentalUI(args []string, stdout, stderr io.Writer, opts runOptions) error {
-	_ = stdout
 	fs := flag.NewFlagSet("kleiber experimental-ui", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	smoke := fs.Bool("smoke", false, "build the experimental UI model and print a summary without opening a window")
+	fs.Usage = func() {
+		fmt.Fprintf(stderr, "Usage: kleiber %s\n", experimentalUICommandLine(opts))
+		fmt.Fprintln(stderr, "  --smoke   build the UI shell/model and print a summary without opening a native window")
+	}
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 
-	projectRoot := ""
-	if rest := fs.Args(); len(rest) > 0 {
+	projectRoot := "."
+	if rest := fs.Args(); len(rest) > 1 {
+		fs.Usage()
+		return fmt.Errorf("experimental-ui: expected at most one path argument")
+	} else if len(rest) == 1 {
 		projectRoot = rest[0]
+	}
+	if !*smoke && !experimentalUIAvailable(opts) {
+		return errExperimentalUIUnavailable
 	}
 
 	ctx := context.Background()
 	shell, err := buildExperimentalUIShell(ctx, projectRoot)
 	if err != nil {
 		return err
+	}
+	if *smoke {
+		defer shell.Close()
+		fmt.Fprint(stdout, experimentalUISmokeSummary(shell.Snapshot()))
+		return nil
 	}
 	if opts.launchUI == nil {
 		shell.Close()
@@ -129,6 +154,48 @@ func runExperimentalUI(args []string, stdout, stderr io.Writer, opts runOptions)
 		WidthDP:  1024,
 		HeightDP: 720,
 	}, stderr)
+}
+
+func experimentalUIAvailable(opts runOptions) bool {
+	if opts.gioUIAvailable != nil {
+		return opts.gioUIAvailable()
+	}
+	return opts.launchUI != nil
+}
+
+func experimentalUICommandLine(opts runOptions) string {
+	line := "experimental-ui [--smoke] [path]   smoke model or open the minimal read-only Gio UI"
+	if !experimentalUIAvailable(opts) {
+		line += " (window requires build with -tags=gio)"
+	}
+	return line
+}
+
+func experimentalUISmokeSummary(snapshot ui.ShellState) string {
+	model := ui.BuildGioRenderModel(snapshot)
+	state := snapshot.State
+	project := "no project"
+	modules := 0
+	packages := 0
+	if state.Project.Open {
+		project = state.Project.Root
+		modules = len(state.Project.Modules)
+		packages = len(state.Project.Packages)
+	}
+
+	var b strings.Builder
+	fmt.Fprintln(&b, "experimental-ui smoke")
+	fmt.Fprintf(&b, "title: %s\n", model.Title)
+	fmt.Fprintf(&b, "project: %s\n", project)
+	fmt.Fprintf(&b, "modules: %d\n", modules)
+	fmt.Fprintf(&b, "packages: %d\n", packages)
+	fmt.Fprintf(&b, "buffers: %d\n", len(state.Buffers))
+	fmt.Fprintf(&b, "commands: %d\n", len(state.Commands))
+	fmt.Fprintln(&b, experimentalUIShortcutSummary)
+	fmt.Fprintf(&b, "render-lines: %d\n", len(model.Lines))
+	fmt.Fprintln(&b, "window: skipped (smoke mode)")
+	fmt.Fprintln(&b, "gopls: not auto-started")
+	return b.String()
 }
 
 func buildExperimentalUIShell(ctx context.Context, projectRoot string) (*ui.Shell, error) {

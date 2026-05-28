@@ -62,6 +62,17 @@ func TestShell_StateDelegatesToPresenterAndIsDefensive(t *testing.T) {
 	if shell.Snapshot().State.Buffers[0].DisplayName == "mutated again" {
 		t.Fatal("Shell.Snapshot returned mutable state")
 	}
+	if err := shell.OpenPalette(); err != nil {
+		t.Fatalf("OpenPalette: %v", err)
+	}
+	snap = shell.Snapshot()
+	if !snap.Palette.Open {
+		t.Fatal("Snapshot.Palette.Open = false after OpenPalette")
+	}
+	snap.Palette.Commands[0].Name = "mutated command"
+	if shell.Snapshot().Palette.Commands[0].Name == "mutated command" {
+		t.Fatal("Shell.Snapshot returned mutable palette commands")
+	}
 }
 
 func TestShell_RefreshRebuildsPresenterState(t *testing.T) {
@@ -156,6 +167,55 @@ func TestShell_DefaultTitleAndNilSafeAccessors(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("nil shell Updates did not close")
+	}
+}
+
+func TestShell_CommandPaletteInteraction(t *testing.T) {
+	session := newRegisteredSession(t, app.Options{})
+	presenter, controller := newPresenterController(t, session)
+	shell, err := NewShell(presenter, controller, ShellOptions{})
+	if err != nil {
+		t.Fatalf("NewShell: %v", err)
+	}
+	defer shell.Close()
+
+	if err := shell.OpenPalette(); err != nil {
+		t.Fatalf("OpenPalette: %v", err)
+	}
+	snap := shell.Snapshot()
+	if !snap.Palette.Open {
+		t.Fatal("palette is closed after OpenPalette")
+	}
+	commandCount := len(snap.Palette.Commands)
+	if commandCount == 0 {
+		t.Fatal("test session has no commands")
+	}
+
+	if err := shell.MovePaletteSelection(-1); err != nil {
+		t.Fatalf("MovePaletteSelection: %v", err)
+	}
+	snap = shell.Snapshot()
+	if snap.Palette.SelectedIndex != commandCount-1 {
+		t.Fatalf("selected index = %d, want wrap to %d", snap.Palette.SelectedIndex, commandCount-1)
+	}
+
+	if err := shell.ClosePalette(); err != nil {
+		t.Fatalf("ClosePalette: %v", err)
+	}
+	snap = shell.Snapshot()
+	if snap.Palette.Open {
+		t.Fatal("palette is open after ClosePalette")
+	}
+
+	var nilShell *Shell
+	if err := nilShell.OpenPalette(); !errors.Is(err, ErrNilShell) {
+		t.Fatalf("nil OpenPalette err = %v, want ErrNilShell", err)
+	}
+	if err := nilShell.ClosePalette(); !errors.Is(err, ErrNilShell) {
+		t.Fatalf("nil ClosePalette err = %v, want ErrNilShell", err)
+	}
+	if err := nilShell.MovePaletteSelection(1); !errors.Is(err, ErrNilShell) {
+		t.Fatalf("nil MovePaletteSelection err = %v, want ErrNilShell", err)
 	}
 }
 

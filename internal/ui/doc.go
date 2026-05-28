@@ -6,7 +6,9 @@
 // The current package contains pure state/view-model adapters, a presenter that
 // tracks when state should be refreshed after core editor events, a typed
 // controller that maps future UI intents onto app-owned commands, a shell
-// boundary future windows can drive, and a minimal read-only Gio renderer behind
-// the gio build tag. Editor rendering, production input handling, and widgets
+// boundary future windows can drive, and a minimal sectioned read-only Gio
+// renderer behind the gio build tag with bounded window-level refresh/quit
+// shortcuts plus first command-palette open/close/navigation state. Palette
+// command execution, editor rendering, production input handling, and widgets
 // beyond the experimental state display are still pending.
 package ui

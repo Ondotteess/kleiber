@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -62,6 +63,75 @@ func TestRun_Help_PrintsUsage(t *testing.T) {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("help output missing %q; got %q", want, stdout.String())
 		}
+	}
+}
+
+func TestRun_Help_MarksExperimentalUIUnavailable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := runOptions{gioUIAvailable: func() bool { return false }}
+	if err := runWithOptions([]string{"help"}, &stdout, &stderr, opts); err != nil {
+		t.Fatalf("run help: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "experimental-ui") {
+		t.Fatalf("help output missing experimental-ui: %q", out)
+	}
+	if !strings.Contains(out, "-tags=gio") {
+		t.Fatalf("help output missing -tags=gio caveat: %q", out)
+	}
+}
+
+func TestRun_NoArgs_MarksExperimentalUIUnavailable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := runOptions{gioUIAvailable: func() bool { return false }}
+	if err := runWithOptions(nil, &stdout, &stderr, opts); err != nil {
+		t.Fatalf("run no args: %v", err)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "experimental-ui") {
+		t.Fatalf("pre-alpha output missing experimental-ui: %q", out)
+	}
+	if !strings.Contains(out, "-tags=gio") {
+		t.Fatalf("pre-alpha output missing -tags=gio caveat: %q", out)
+	}
+}
+
+func TestRun_ExperimentalUIHelp_MarksUnavailable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := runOptions{gioUIAvailable: func() bool { return false }}
+	if err := runWithOptions([]string{"experimental-ui", "--help"}, &stdout, &stderr, opts); err != nil {
+		t.Fatalf("run experimental-ui --help: %v", err)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "experimental-ui") {
+		t.Fatalf("experimental-ui help missing command: %q", out)
+	}
+	if !strings.Contains(out, "-tags=gio") {
+		t.Fatalf("experimental-ui help missing -tags=gio caveat: %q", out)
+	}
+	if !strings.Contains(out, "--smoke") {
+		t.Fatalf("experimental-ui help missing --smoke: %q", out)
+	}
+}
+
+func TestRun_Help_AvailableExperimentalUIDoesNotSayUnavailable(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := runOptions{
+		gioUIAvailable: func() bool { return true },
+		launchUI: func(ctx context.Context, shell *ui.Shell, opts ui.GioWindowOptions, stderr io.Writer) error {
+			t.Fatal("launcher should not be called by help")
+			return nil
+		},
+	}
+	if err := runWithOptions([]string{"help"}, &stdout, &stderr, opts); err != nil {
+		t.Fatalf("run help: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "experimental-ui") {
+		t.Fatalf("help output missing experimental-ui: %q", out)
+	}
+	if strings.Contains(out, "-tags=gio") {
+		t.Fatalf("available help should not claim Gio tag is required: %q", out)
 	}
 }
 
@@ -171,5 +241,226 @@ func TestRun_ExperimentalUI_ConstructsShellAndUsesLauncher(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "experimental UI") {
 		t.Fatalf("stderr = %q, want experimental UI notice", stderr.String())
+	}
+}
+
+func TestRun_ExperimentalUI_NoArgsAccepted(t *testing.T) {
+	dir := t.TempDir()
+	writeMiniGoProject(t, dir, "example.com/noargs")
+	t.Chdir(dir)
+
+	var launched bool
+	opts := runOptions{
+		gioUIAvailable: func() bool { return true },
+		launchUI: func(ctx context.Context, shell *ui.Shell, opts ui.GioWindowOptions, stderr io.Writer) error {
+			_ = ctx
+			_ = opts
+			_ = stderr
+			launched = true
+			shell.Close()
+			return nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	if err := runWithOptions([]string{"experimental-ui"}, &stdout, &stderr, opts); err != nil {
+		t.Fatalf("run experimental-ui: %v", err)
+	}
+	if !launched {
+		t.Fatal("launcher was not called")
+	}
+}
+
+func TestRun_ExperimentalUI_RejectsExtraArgs(t *testing.T) {
+	opts := runOptions{
+		gioUIAvailable: func() bool { return true },
+		launchUI: func(ctx context.Context, shell *ui.Shell, opts ui.GioWindowOptions, stderr io.Writer) error {
+			t.Fatal("launcher should not be called for invalid args")
+			return nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := runWithOptions([]string{"experimental-ui", ".", "extra"}, &stdout, &stderr, opts)
+	if err == nil {
+		t.Fatal("run returned nil error for extra args")
+	}
+	if !strings.Contains(err.Error(), "at most one path") {
+		t.Fatalf("err = %q, want path count error", err.Error())
+	}
+	if !strings.Contains(stderr.String(), "Usage: kleiber experimental-ui [--smoke] [path]") {
+		t.Fatalf("stderr = %q, want usage", stderr.String())
+	}
+}
+
+func TestRun_ExperimentalUI_HelpSucceeds(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if err := run([]string{"experimental-ui", "--help"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run experimental-ui --help: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "Usage: kleiber experimental-ui [--smoke] [path]") {
+		t.Fatalf("stderr = %q, want usage", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--smoke") {
+		t.Fatalf("stderr = %q, want --smoke help", stderr.String())
+	}
+}
+
+func TestRun_ExperimentalUI_NonGioUnavailableFailsBeforeProjectSetup(t *testing.T) {
+	opts := runOptions{
+		gioUIAvailable: func() bool { return false },
+		launchUI: func(ctx context.Context, shell *ui.Shell, opts ui.GioWindowOptions, stderr io.Writer) error {
+			t.Fatal("launcher should not be called when Gio is unavailable")
+			return nil
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	err := runWithOptions([]string{"experimental-ui", `Z:\definitely-missing-kleiber-path`}, &stdout, &stderr, opts)
+	if !errors.Is(err, errExperimentalUIUnavailable) {
+		t.Fatalf("err = %v, want %v", err, errExperimentalUIUnavailable)
+	}
+	if strings.Contains(stderr.String(), "Starting") {
+		t.Fatalf("stderr = %q, should not print start notice before Gio availability check", stderr.String())
+	}
+}
+
+func TestRun_ExperimentalUI_SmokeNoArgsUsesCwdWithoutGio(t *testing.T) {
+	dir := t.TempDir()
+	writeMiniGoProject(t, dir, "example.com/smokecwd")
+	t.Chdir(dir)
+
+	opts := runOptions{
+		gioUIAvailable: func() bool { return false },
+		launchUI: func(ctx context.Context, shell *ui.Shell, opts ui.GioWindowOptions, stderr io.Writer) error {
+			t.Fatal("launcher should not be called in smoke mode")
+			return nil
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runWithOptions([]string{"experimental-ui", "--smoke"}, &stdout, &stderr, opts); err != nil {
+		t.Fatalf("run experimental-ui --smoke: %v", err)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"experimental-ui smoke",
+		"project: " + dir,
+		"modules: 1",
+		"packages: 1",
+		"buffers: 0",
+		"commands: ",
+		"shortcuts: Ctrl+P/Command+P opens palette; Up/Down navigate palette; Enter pending/no-op (command execution pending); Escape closes palette before quit; F5/Ctrl+R/Command+R refresh; Ctrl+Q/Command+Q quit",
+		"window: skipped (smoke mode)",
+		"gopls: not auto-started",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("smoke output missing %q:\n%s", want, out)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRun_ExperimentalUI_SmokeDotPrintsSummaryWithoutGio(t *testing.T) {
+	dir := t.TempDir()
+	writeMiniGoProject(t, dir, "example.com/smokedot")
+	t.Chdir(dir)
+
+	var stdout, stderr bytes.Buffer
+	opts := runOptions{gioUIAvailable: func() bool { return false }}
+	if err := runWithOptions([]string{"experimental-ui", "--smoke", "."}, &stdout, &stderr, opts); err != nil {
+		t.Fatalf("run experimental-ui --smoke .: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "project: "+dir) || !strings.Contains(out, "window: skipped (smoke mode)") {
+		t.Fatalf("unexpected smoke output:\n%s", out)
+	}
+}
+
+func TestRun_ExperimentalUI_SmokeMissingProjectReturnsProjectError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := runOptions{gioUIAvailable: func() bool { return false }}
+	err := runWithOptions([]string{"experimental-ui", "--smoke", `Z:\definitely-missing-kleiber-path`}, &stdout, &stderr, opts)
+	if err == nil {
+		t.Fatal("run returned nil error for missing smoke project")
+	}
+	if errors.Is(err, errExperimentalUIUnavailable) || strings.Contains(err.Error(), "-tags=gio") {
+		t.Fatalf("err = %v, want project error not Gio tag error", err)
+	}
+	if !strings.Contains(err.Error(), "opening project") {
+		t.Fatalf("err = %v, want project open error", err)
+	}
+}
+
+func TestRun_ExperimentalUI_SmokeRejectsExtraArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	opts := runOptions{gioUIAvailable: func() bool { return false }}
+	err := runWithOptions([]string{"experimental-ui", "--smoke", ".", "extra"}, &stdout, &stderr, opts)
+	if err == nil {
+		t.Fatal("run returned nil error for extra smoke args")
+	}
+	if !strings.Contains(err.Error(), "at most one path") {
+		t.Fatalf("err = %q, want path count error", err.Error())
+	}
+	if !strings.Contains(stderr.String(), "Usage: kleiber experimental-ui [--smoke] [path]") {
+		t.Fatalf("stderr = %q, want usage", stderr.String())
+	}
+}
+
+func TestExperimentalUISmokeSummary_NoProjectDeterministic(t *testing.T) {
+	summary := experimentalUISmokeSummary(ui.ShellState{
+		Title: "Kleiber Smoke",
+		State: ui.State{
+			Commands: []ui.CommandItem{{Name: "editor.openFile"}},
+		},
+	})
+	want := strings.Join([]string{
+		"experimental-ui smoke",
+		"title: Kleiber Smoke",
+		"project: no project",
+		"modules: 0",
+		"packages: 0",
+		"buffers: 0",
+		"commands: 1",
+		"shortcuts: Ctrl+P/Command+P opens palette; Up/Down navigate palette; Enter pending/no-op (command execution pending); Escape closes palette before quit; F5/Ctrl+R/Command+R refresh; Ctrl+Q/Command+Q quit",
+		"render-lines: 14",
+		"window: skipped (smoke mode)",
+		"gopls: not auto-started",
+		"",
+	}, "\n")
+	if summary != want {
+		t.Fatalf("summary =\n%s\nwant =\n%s", summary, want)
+	}
+}
+
+func TestRun_ExperimentalUI_NonGioValidPathStillFailsFast(t *testing.T) {
+	dir := t.TempDir()
+	writeMiniGoProject(t, dir, "example.com/failfast")
+
+	opts := runOptions{
+		gioUIAvailable: func() bool { return false },
+		launchUI: func(ctx context.Context, shell *ui.Shell, opts ui.GioWindowOptions, stderr io.Writer) error {
+			t.Fatal("launcher should not be called when Gio is unavailable")
+			return nil
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	err := runWithOptions([]string{"experimental-ui", dir}, &stdout, &stderr, opts)
+	if !errors.Is(err, errExperimentalUIUnavailable) {
+		t.Fatalf("err = %v, want %v", err, errExperimentalUIUnavailable)
+	}
+	if strings.Contains(stderr.String(), "Starting") {
+		t.Fatalf("stderr = %q, should not print start notice before Gio availability check", stderr.String())
+	}
+}
+
+func writeMiniGoProject(t *testing.T, dir, module string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module "+module+"\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("write main.go: %v", err)
 	}
 }
