@@ -23,8 +23,6 @@ import (
 
 var errExperimentalUIUnavailable = errors.New("experimental-ui requires a build with -tags=gio")
 
-const experimentalUIShortcutSummary = "shortcuts: Ctrl+P/Command+P opens palette; Up/Down navigate palette; Enter pending/no-op (command execution pending); Escape closes palette before quit; F5/Ctrl+R/Command+R refresh; Ctrl+Q/Command+Q quit"
-
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "kleiber:", err)
@@ -191,7 +189,7 @@ func experimentalUISmokeSummary(snapshot ui.ShellState) string {
 	fmt.Fprintf(&b, "packages: %d\n", packages)
 	fmt.Fprintf(&b, "buffers: %d\n", len(state.Buffers))
 	fmt.Fprintf(&b, "commands: %d\n", len(state.Commands))
-	fmt.Fprintln(&b, experimentalUIShortcutSummary)
+	fmt.Fprintln(&b, ui.ExperimentalUIShortcutSummary)
 	fmt.Fprintf(&b, "render-lines: %d\n", len(model.Lines))
 	fmt.Fprintln(&b, "window: skipped (smoke mode)")
 	fmt.Fprintln(&b, "gopls: not auto-started")

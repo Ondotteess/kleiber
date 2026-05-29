@@ -349,7 +349,7 @@ func TestRun_ExperimentalUI_SmokeNoArgsUsesCwdWithoutGio(t *testing.T) {
 		"packages: 1",
 		"buffers: 0",
 		"commands: ",
-		"shortcuts: Ctrl+P/Command+P opens palette; Up/Down navigate palette; Enter pending/no-op (command execution pending); Escape closes palette before quit; F5/Ctrl+R/Command+R refresh; Ctrl+Q/Command+Q quit",
+		ui.ExperimentalUIShortcutSummary,
 		"window: skipped (smoke mode)",
 		"gopls: not auto-started",
 	} {
@@ -423,7 +423,7 @@ func TestExperimentalUISmokeSummary_NoProjectDeterministic(t *testing.T) {
 		"packages: 0",
 		"buffers: 0",
 		"commands: 1",
-		"shortcuts: Ctrl+P/Command+P opens palette; Up/Down navigate palette; Enter pending/no-op (command execution pending); Escape closes palette before quit; F5/Ctrl+R/Command+R refresh; Ctrl+Q/Command+Q quit",
+		ui.ExperimentalUIShortcutSummary,
 		"render-lines: 14",
 		"window: skipped (smoke mode)",
 		"gopls: not auto-started",

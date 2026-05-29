@@ -11,6 +11,15 @@ const (
 	maxGioLineRunes    = 160
 )
 
+const (
+	// ExperimentalUIShortcutSummary is the user-facing shortcut contract shared
+	// by the no-window smoke path and the experimental Gio render model.
+	ExperimentalUIShortcutSummary = "shortcuts: Ctrl+P/Command+P opens palette; Up/Down navigate palette; Enter pending/no-op (command execution pending); Escape closes palette before quit; F5/Ctrl+R/Command+R refresh; Ctrl+Q/Command+Q quit"
+
+	gioWindowShortcutStatus = "window: Ctrl+P palette | Up/Down navigate | Enter pending/no-op | Esc closes palette/quit | F5/Ctrl+R/Command+R refresh | Ctrl+Q/Command+Q quit"
+	gioPaletteShortcutHint  = "Ctrl+P open | Up/Down navigate | Enter execution pending | Escape close"
+)
+
 // GioRenderModel is the minimal read-only data a Gio renderer lays out. It is
 // intentionally presentation-oriented but still independent from Gio packages
 // so it can be tested without opening a window.
@@ -49,7 +58,7 @@ func BuildGioRenderModel(snapshot ShellState) GioRenderModel {
 		Lines: []GioRenderLine{
 			{Text: title, Role: GioRenderLineTitle},
 			{Text: "read-only experimental UI | pre-alpha | gopls not auto-started", Role: GioRenderLineStatus},
-			{Text: "window: Ctrl+P palette | Up/Down navigate | Enter pending/no-op | Esc closes palette/quit | F5/Ctrl+R/Command+R refresh | Ctrl+Q/Command+Q quit", Role: GioRenderLineMuted},
+			{Text: gioWindowShortcutStatus, Role: GioRenderLineMuted},
 			{Text: fmt.Sprintf("summary: commands %d | buffers %d | views %d", len(state.Commands), len(state.Buffers), len(state.Views)), Role: GioRenderLineMuted},
 		},
 	}
@@ -72,7 +81,7 @@ func (m *GioRenderModel) addCommandPalette(palette CommandPaletteSnapshot) {
 		return
 	}
 	m.addSection("Command Palette")
-	m.addMuted("Ctrl+P open | Up/Down navigate | Enter execution pending | Escape close")
+	m.addMuted(gioPaletteShortcutHint)
 	commands := sortedCommands(palette.Commands)
 	if len(commands) == 0 {
 		m.addMuted("No commands registered")

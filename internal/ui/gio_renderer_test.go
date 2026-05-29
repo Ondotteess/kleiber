@@ -35,6 +35,21 @@ func TestBuildGioRenderModel_EmptyState(t *testing.T) {
 	}
 }
 
+func TestExperimentalUIShortcutSummary_CoversPaletteContract(t *testing.T) {
+	for _, want := range []string{
+		"Ctrl+P/Command+P opens palette",
+		"Up/Down navigate palette",
+		"Enter pending/no-op (command execution pending)",
+		"Escape closes palette before quit",
+		"F5/Ctrl+R/Command+R refresh",
+		"Ctrl+Q/Command+Q quit",
+	} {
+		if !strings.Contains(ExperimentalUIShortcutSummary, want) {
+			t.Fatalf("shortcut summary missing %q: %s", want, ExperimentalUIShortcutSummary)
+		}
+	}
+}
+
 func TestBuildGioRenderModel_CommandPaletteOpen(t *testing.T) {
 	commands := []CommandItem{
 		{Name: "editor.openFile", Description: "Open file"},
