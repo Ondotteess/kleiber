@@ -175,12 +175,46 @@ func TestWorkbench_Expand_Toggle(t *testing.T) {
 	}
 }
 
-func TestWorkbench_RefreshTree_NoProject_ClearsTree(t *testing.T) {
+func TestWorkbench_RefreshTree_NoRoot_ClearsTree(t *testing.T) {
 	wb := newWorkbench(t)
 	if err := wb.RefreshTree(context.Background()); err != nil {
 		t.Fatalf("RefreshTree: %v", err)
 	}
 	if _, ok := wb.Tree(); ok {
-		t.Error("Tree loaded despite no project")
+		t.Error("Tree loaded despite no root")
 	}
+}
+
+func TestWorkbench_RefreshTree_BuildsFromRoot(t *testing.T) {
+	wb := newWorkbench(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "main.go"), "package main\n")
+	writeFile(t, filepath.Join(dir, "README.md"), "# hi\n")
+
+	wb.SetRoot(dir)
+	if err := wb.RefreshTree(context.Background()); err != nil {
+		t.Fatalf("RefreshTree: %v", err)
+	}
+	tree, ok := wb.Tree()
+	if !ok {
+		t.Fatal("Tree not loaded after RefreshTree with root")
+	}
+	// The tree includes non-Go files (README.md), which a project-analysis
+	// tree would omit.
+	var names []string
+	for _, c := range tree.Children {
+		names = append(names, c.Name)
+	}
+	if !containsString(names, "main.go") || !containsString(names, "README.md") {
+		t.Errorf("tree children = %v, want main.go and README.md", names)
+	}
+}
+
+func containsString(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }

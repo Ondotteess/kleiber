@@ -39,6 +39,7 @@ type Workbench struct {
 	engine  *editor.EditorEngine
 
 	mu       sync.Mutex
+	root     string
 	tabs     []Tab
 	active   int // index into tabs; -1 when empty
 	tree     project.TreeNode
@@ -47,17 +48,41 @@ type Workbench struct {
 }
 
 // NewWorkbench constructs a Workbench over a session. It performs no I/O;
-// call RefreshTree to load the file explorer.
+// call RefreshTree to load the file explorer. When the session has an open
+// project, the explorer root defaults to the project root; override it
+// with SetRoot.
 func NewWorkbench(session *app.Session) (*Workbench, error) {
 	if session == nil {
 		return nil, ErrNilSession
 	}
+	root := ""
+	if proj := session.Project(); proj != nil {
+		root = proj.Root()
+	}
 	return &Workbench{
 		session:  session,
 		engine:   session.Editor(),
+		root:     root,
 		active:   -1,
 		expanded: map[string]bool{},
 	}, nil
+}
+
+// SetRoot sets the file-explorer root directory. It is used when the
+// workspace root is known independently of a loaded project — notably so
+// the tree still renders for a project whose code does not compile (which
+// an IDE must open). Call RefreshTree afterward to reload.
+func (w *Workbench) SetRoot(root string) {
+	w.mu.Lock()
+	w.root = root
+	w.mu.Unlock()
+}
+
+// Root returns the file-explorer root directory.
+func (w *Workbench) Root() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.root
 }
 
 // Session returns the underlying app session.
@@ -188,18 +213,20 @@ func (w *Workbench) BufferDirty(id editor.BufferID) bool {
 	return err == nil && dirty
 }
 
-// RefreshTree reloads the file-tree explorer from the project root. It is
-// a no-op (clearing the tree) when no project is open.
+// RefreshTree reloads the file-tree explorer by walking the root
+// directory. It builds the tree straight from the filesystem (not from
+// loaded project analysis), so the explorer works even when the project's
+// Go code does not compile. With no root set it clears the tree.
 func (w *Workbench) RefreshTree(ctx context.Context) error {
-	proj := w.session.Project()
-	if proj == nil {
+	root := w.Root()
+	if root == "" {
 		w.mu.Lock()
 		w.tree = project.TreeNode{}
 		w.treeOK = false
 		w.mu.Unlock()
 		return nil
 	}
-	tree, err := proj.FileTree(ctx)
+	tree, err := project.BuildFileTree(ctx, root)
 	if err != nil {
 		return err
 	}
