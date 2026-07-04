@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -64,6 +66,25 @@ func New(opts Options) *slog.Logger {
 // nil-safe default in constructors that accept a *slog.Logger.
 func Discard() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// OpenFile opens the log file at path for appending, creating it and any
+// missing parent directories. The returned file is the caller's to
+// close; pass it as Options.Writer to route logs to disk.
+//
+// It opens in append mode so restarts accumulate rather than truncate a
+// prior session's log.
+func OpenFile(path string) (*os.File, error) {
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("logging: creating log directory %s: %w", dir, err)
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("logging: opening log file %s: %w", path, err)
+	}
+	return f, nil
 }
 
 // ParseLevel maps a case-insensitive level name ("debug", "info", "warn",

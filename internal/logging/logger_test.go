@@ -4,9 +4,45 @@ import (
 	"bytes"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestOpenFile_CreatesDirsAndAppends(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logs", "kleiber.log")
+
+	f, err := OpenFile(path)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	logger := New(Options{Level: slog.LevelInfo, Writer: f})
+	logger.Info("first")
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen: append mode must preserve the earlier record.
+	f2, err := OpenFile(path)
+	if err != nil {
+		t.Fatalf("OpenFile (reopen): %v", err)
+	}
+	logger2 := New(Options{Level: slog.LevelInfo, Writer: f2})
+	logger2.Info("second")
+	if err := f2.Close(); err != nil {
+		t.Fatalf("Close (reopen): %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	out := string(data)
+	if !strings.Contains(out, "first") || !strings.Contains(out, "second") {
+		t.Errorf("log file %q missing appended records", out)
+	}
+}
 
 func TestNew_TextWriter_EmitsRecord(t *testing.T) {
 	var buf bytes.Buffer
