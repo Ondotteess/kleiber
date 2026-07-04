@@ -39,6 +39,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 type runOptions struct {
 	gioUIAvailable func() bool
 	launchUI       func(context.Context, *ui.Shell, ui.GioWindowOptions, io.Writer) error
+	launchIDE      func(context.Context, *ui.Workbench, ui.IDEWindowOptions, io.Writer) error
 }
 
 func runWithOptions(args []string, stdout, stderr io.Writer, opts runOptions) error {
@@ -46,6 +47,8 @@ func runWithOptions(args []string, stdout, stderr io.Writer, opts runOptions) er
 		switch args[0] {
 		case "doctor":
 			return runDoctor(args[1:], stdout, stderr)
+		case "edit":
+			return runEdit(args[1:], stdout, stderr, opts)
 		case "experimental-ui":
 			return runExperimentalUI(args[1:], stdout, stderr, opts)
 		case "help":
@@ -80,8 +83,9 @@ func runTop(args []string, stdout, stderr io.Writer, opts runOptions) error {
 	// is informational and exposes the doctor subcommand.
 	fmt.Fprintf(stderr,
 		"kleiber %s (pre-alpha)\n"+
-			"No UI yet — see docs/product/roadmap.md for milestones.\n"+
+			"See docs/product/roadmap.md for milestones.\n"+
 			"Available subcommands:\n"+
+			"  kleiber edit [path]     open a project in the IDE window\n"+
 			"  kleiber doctor [path]   diagnose a Go project\n"+
 			"  kleiber %s\n"+
 			"  kleiber help            show this message\n",
@@ -97,6 +101,7 @@ func runHelp(_ []string, stdout io.Writer, opts runOptions) error {
 		"kleiber %s\n\n"+
 			"Usage:\n"+
 			"  kleiber [--version|-v]\n"+
+			"  kleiber edit [--debug] [--log-file PATH] [path]\n"+
 			"  kleiber doctor [path]\n"+
 			"  kleiber %s\n"+
 			"  kleiber help\n",

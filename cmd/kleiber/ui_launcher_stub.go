@@ -19,5 +19,12 @@ func defaultRunOptions() runOptions {
 			shell.Close()
 			return errExperimentalUIUnavailable
 		},
+		launchIDE: func(ctx context.Context, wb *ui.Workbench, opts ui.IDEWindowOptions, stderr io.Writer) error {
+			_ = ctx
+			_ = wb
+			_ = opts
+			_ = stderr
+			return errIDEUnavailable
+		},
 	}
 }

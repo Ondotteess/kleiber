@@ -1,0 +1,169 @@
+//go:build gio
+
+package ui
+
+import (
+	"context"
+	"errors"
+	"image"
+
+	gioapp "gioui.org/app"
+	"gioui.org/io/key"
+	"gioui.org/layout"
+	"gioui.org/op"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
+	"gioui.org/unit"
+)
+
+// Default IDE window geometry and title used when options leave them unset.
+const (
+	defaultIDEWidthDP  = 1100
+	defaultIDEHeightDP = 740
+	defaultIDETitle    = "Kleiber"
+	ideTreeWidthDP     = 260
+)
+
+// ErrNilWorkbench is returned when RunIDEWindow is called without a
+// workbench.
+var ErrNilWorkbench = errors.New("ui: nil workbench")
+
+// ideWindow holds the widgets and theme built once for the window's lifetime.
+type ideWindow struct {
+	theme  *IDETheme
+	tree   *IDETree
+	tabs   *IDETabs
+	editor *IDEEditor
+}
+
+// newIDEWindow constructs the widget set for the IDE window.
+func newIDEWindow() *ideWindow {
+	return &ideWindow{
+		theme:  NewIDETheme(),
+		tree:   NewIDETree(),
+		tabs:   NewIDETabs(),
+		editor: NewIDEEditor(),
+	}
+}
+
+// RunIDEWindow runs the read-only IDE window event loop over wb. It mirrors
+// RunGioWindow's platform contract: the caller is responsible for invoking
+// gioapp.Main from the program's main goroutine. It returns when the window
+// is destroyed, propagating any non-cancellation error.
+func RunIDEWindow(ctx context.Context, wb *Workbench, opts IDEWindowOptions) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if wb == nil {
+		return ErrNilWorkbench
+	}
+
+	title := opts.Title
+	if title == "" {
+		title = defaultIDETitle
+	}
+	width := opts.WidthDP
+	if width <= 0 {
+		width = defaultIDEWidthDP
+	}
+	height := opts.HeightDP
+	if height <= 0 {
+		height = defaultIDEHeightDP
+	}
+
+	w := new(gioapp.Window)
+	w.Option(
+		gioapp.Title(title),
+		gioapp.Size(unit.Dp(width), unit.Dp(height)),
+	)
+
+	view := newIDEWindow()
+	var ops op.Ops
+
+	for {
+		event := w.Event()
+		switch event := event.(type) {
+		case gioapp.DestroyEvent:
+			if event.Err != nil && !errors.Is(event.Err, context.Canceled) {
+				return event.Err
+			}
+			return nil
+		case gioapp.FrameEvent:
+			gtx := gioapp.NewContext(&ops, event)
+			handleIDEKeys(gtx, wb, w)
+			if view.layout(gtx, wb) {
+				w.Invalidate()
+			}
+			event.Frame(&ops)
+		}
+	}
+}
+
+// handleIDEKeys processes the minimal key bindings for the read-only
+// skeleton: Ctrl+W closes the active tab. Richer input lands in a later task.
+func handleIDEKeys(gtx layout.Context, wb *Workbench, w *gioapp.Window) {
+	for {
+		ev, ok := gtx.Event(
+			key.Filter{Name: key.Name("W"), Required: key.ModCtrl},
+			key.Filter{Name: key.Name("W"), Required: key.ModCommand},
+		)
+		if !ok {
+			return
+		}
+		ke, ok := ev.(key.Event)
+		if !ok || ke.State != key.Press {
+			continue
+		}
+		if idx := wb.ActiveIndex(); idx >= 0 {
+			_ = wb.CloseTab(idx)
+			w.Invalidate()
+		}
+	}
+}
+
+// layout draws the whole window: file tree, a divider, then the tab strip
+// over the editor. It reports whether any interaction changed state so the
+// caller can request a redraw.
+func (v *ideWindow) layout(gtx layout.Context, wb *Workbench) bool {
+	paint.FillShape(gtx.Ops, v.theme.Background, clip.Rect{Max: gtx.Constraints.Max}.Op())
+	changed := false
+
+	layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			treeWidth := gtx.Metric.Dp(unit.Dp(ideTreeWidthDP))
+			gtx.Constraints.Min.X = treeWidth
+			gtx.Constraints.Max.X = treeWidth
+			dims, ch := v.tree.Layout(gtx, v.theme, wb)
+			if ch {
+				changed = true
+			}
+			return dims
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return v.divider(gtx)
+		}),
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					dims, ch := v.tabs.Layout(gtx, v.theme, wb)
+					if ch {
+						changed = true
+					}
+					return dims
+				}),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return v.editor.Layout(gtx, v.theme, wb)
+				}),
+			)
+		}),
+	)
+	return changed
+}
+
+// divider draws a 1px vertical separator sized to the available height.
+func (v *ideWindow) divider(gtx layout.Context) layout.Dimensions {
+	width := 1
+	size := image.Point{X: width, Y: gtx.Constraints.Max.Y}
+	paint.FillShape(gtx.Ops, v.theme.Divider, clip.Rect{Max: size}.Op())
+	return layout.Dimensions{Size: size}
+}
