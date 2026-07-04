@@ -198,6 +198,11 @@ type TextDocumentSyncClientCapabilities struct {
 	// DynamicRegistration is false: we negotiate capabilities once
 	// at initialize and do not support runtime re-registration.
 	DynamicRegistration bool `json:"dynamicRegistration"`
+
+	// DidSave advertises that the client sends textDocument/didSave
+	// notifications. gopls uses save notifications to re-run analyses
+	// (e.g. vet-style checks) that it defers while a buffer is dirty.
+	DidSave bool `json:"didSave,omitempty"`
 }
 
 // PublishDiagnosticsClientCapabilities tells the server what the client
@@ -396,6 +401,14 @@ type DidChangeTextDocumentParams struct {
 
 // DidCloseTextDocumentParams is the payload for textDocument/didClose.
 type DidCloseTextDocumentParams struct {
+	TextDocument TextDocumentIdentifier `json:"textDocument"`
+}
+
+// DidSaveTextDocumentParams is the payload for textDocument/didSave.
+// Text is omitted: Kleiber advertises save support without includeText,
+// so the server re-reads the file itself rather than trusting a snapshot
+// the client would have to keep in sync.
+type DidSaveTextDocumentParams struct {
 	TextDocument TextDocumentIdentifier `json:"textDocument"`
 }
 
@@ -651,6 +664,7 @@ const (
 	MethodTextDocumentDidOpen    = "textDocument/didOpen"
 	MethodTextDocumentDidChange  = "textDocument/didChange"
 	MethodTextDocumentDidClose   = "textDocument/didClose"
+	MethodTextDocumentDidSave    = "textDocument/didSave"
 	MethodTextDocumentHover      = "textDocument/hover"
 	MethodTextDocumentCompletion = "textDocument/completion"
 	MethodTextDocumentDefinition = "textDocument/definition"

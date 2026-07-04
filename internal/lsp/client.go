@@ -150,6 +150,24 @@ func (c *Client) Pid() int {
 	return c.process.Pid()
 }
 
+// Done returns a channel that is closed when the client's read loop
+// terminates — because gopls exited (crash or clean shutdown) or because
+// Stop was called. Before a successful Start it returns nil, whose
+// receive blocks forever; call Done only after Start succeeds.
+//
+// A supervisor pairs Done with Stopping to distinguish a crash (restart)
+// from an intentional Stop (do nothing).
+func (c *Client) Done() <-chan struct{} {
+	return c.readLoopDone
+}
+
+// Stopping reports whether Stop has begun. After Done fires, a
+// supervisor checks Stopping to tell an intentional shutdown from a
+// crash that warrants a restart.
+func (c *Client) Stopping() bool {
+	return c.stopping.Load()
+}
+
 // Start spawns gopls, opens stdio, runs the initialize/initialized
 // handshake, and leaves the Client ready to accept document and
 // language requests. On failure it cleans up the subprocess so callers
@@ -328,6 +346,22 @@ func (c *Client) DidClose(ctx context.Context, uri DocumentURI) error {
 		return err
 	}
 	return c.notify(MethodTextDocumentDidClose, DidCloseTextDocumentParams{
+		TextDocument: TextDocumentIdentifier{URI: uri},
+	})
+}
+
+// DidSave tells the server that the editor saved a document to disk.
+// Kleiber advertises save support without includeText, so no buffer
+// contents are sent; gopls re-reads the file. It is a notification, so
+// there is nothing to await.
+func (c *Client) DidSave(ctx context.Context, uri DocumentURI) error {
+	if !c.started.Load() {
+		return ErrClientNotStarted
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.notify(MethodTextDocumentDidSave, DidSaveTextDocumentParams{
 		TextDocument: TextDocumentIdentifier{URI: uri},
 	})
 }
@@ -766,7 +800,7 @@ func defaultClientCapabilities() ClientCapabilities {
 			WorkspaceFolders: true,
 		},
 		TextDocument: &TextDocumentClientCapabilities{
-			Synchronization:    &TextDocumentSyncClientCapabilities{},
+			Synchronization:    &TextDocumentSyncClientCapabilities{DidSave: true},
 			PublishDiagnostics: &PublishDiagnosticsClientCapabilities{VersionSupport: true},
 			Hover: &HoverClientCapabilities{
 				ContentFormat: []MarkupKind{MarkupKindPlainText, MarkupKindMarkdown},

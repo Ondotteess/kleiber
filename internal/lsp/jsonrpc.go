@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,11 @@ import (
 
 	"github.com/Ondotteess/kleiber/internal/logging"
 )
+
+// maxLoggedBodyBytes caps how much of a frame body the wire trace emits,
+// so one large completion or diagnostics frame cannot flood the debug
+// log. Bodies past this length are truncated with an elision marker.
+const maxLoggedBodyBytes = 4096
 
 // jsonRPCVersion is the only protocol version this codec accepts.
 // Both peers MUST emit "jsonrpc": "2.0"; anything else is a wire error.
@@ -123,6 +129,19 @@ func (id ID) AsString() (string, bool) {
 
 // IsNull reports whether the ID was the JSON literal null.
 func (id ID) IsNull() bool { return id.isNull }
+
+// String renders the ID for logs: the integer, the quoted string, or
+// "null". It is not the wire encoding — use MarshalJSON for that.
+func (id ID) String() string {
+	switch {
+	case id.isNull:
+		return "null"
+	case id.isString:
+		return strconv.Quote(id.str)
+	default:
+		return strconv.FormatInt(id.num, 10)
+	}
+}
 
 // MarshalJSON encodes the ID as either an integer or a string. A null ID
 // (from decoding) is emitted as JSON null.
@@ -399,6 +418,7 @@ func (c *Conn) Read() (Message, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.logFrame("recv", msg, body)
 	return msg, nil
 }
 
@@ -433,7 +453,40 @@ func (c *Conn) Write(msg Message) error {
 	if _, err := c.w.Write(buf); err != nil {
 		return fmt.Errorf("jsonrpc: writing frame: %w", err)
 	}
+	c.logFrame("send", msg, body)
 	return nil
+}
+
+// logFrame emits one Debug record per JSON-RPC frame: the wire-traffic
+// trace enabled by running with --debug. At Info and above it is inert
+// (the Enabled guard skips building attributes and truncating bodies).
+// direction is "send" or "recv".
+func (c *Conn) logFrame(direction string, msg Message, body []byte) {
+	if !c.logger.Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	attrs := []any{"dir", direction, "bytes", len(body)}
+	switch m := msg.(type) {
+	case *Request:
+		attrs = append(attrs, "kind", "request", "method", m.Method, "id", m.ID.String())
+	case *Notification:
+		attrs = append(attrs, "kind", "notification", "method", m.Method)
+	case *Response:
+		attrs = append(attrs, "kind", "response", "id", m.ID.String())
+		if m.Error != nil {
+			attrs = append(attrs, "rpcError", m.Error.Message)
+		}
+	}
+	attrs = append(attrs, "body", truncateForLog(body))
+	c.logger.Debug("jsonrpc frame", attrs...)
+}
+
+// truncateForLog returns body as a string, elided to maxLoggedBodyBytes.
+func truncateForLog(body []byte) string {
+	if len(body) <= maxLoggedBodyBytes {
+		return string(body)
+	}
+	return string(body[:maxLoggedBodyBytes]) + "...(truncated)"
 }
 
 // readHeaders consumes the LSP frame header block and returns the

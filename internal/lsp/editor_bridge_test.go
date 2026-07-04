@@ -47,6 +47,57 @@ func newBridgeFixture(t *testing.T) *bridgeFixture {
 	}
 }
 
+func TestBridge_OpenExistingBuffers_OpensPreexistingGoBuffer(t *testing.T) {
+	client, server := connectedClient(t)
+	engine := editor.NewEngine(editor.EngineOptions{Logger: testLogger(t)})
+
+	opened := make(chan *Notification, 4)
+	server.HandleNotification(MethodTextDocumentDidOpen, func(n *Notification) {
+		opened <- n
+	})
+
+	// Open a Go buffer BEFORE the bridge exists, so no BufferOpened event
+	// is ever observed by the bridge.
+	path := writeGoFile(t, "package x\n")
+	id, err := engine.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	bridge := NewBridge(context.Background(), BridgeOptions{Logger: testLogger(t)}, client, engine)
+	t.Cleanup(bridge.Close)
+
+	// Nothing opened yet: the bridge missed the pre-existing buffer.
+	select {
+	case n := <-opened:
+		t.Fatalf("unexpected didOpen before OpenExistingBuffers: %s", n.Params)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	bridge.OpenExistingBuffers(context.Background())
+
+	openN := waitForNotification(t, opened, bridgeRouteWait)
+	var openP DidOpenTextDocumentParams
+	if err := json.Unmarshal(openN.Params, &openP); err != nil {
+		t.Fatalf("unmarshal didOpen: %v", err)
+	}
+	wantURI, _ := DocumentURIFromPath(path)
+	if openP.TextDocument.URI != wantURI {
+		t.Errorf("didOpen URI = %q, want %q", openP.TextDocument.URI, wantURI)
+	}
+	if got := bridge.uriFor(id); got != wantURI {
+		t.Errorf("bridge tracking URI = %q, want %q", got, wantURI)
+	}
+
+	// Idempotent: a second call does not re-open the tracked buffer.
+	bridge.OpenExistingBuffers(context.Background())
+	select {
+	case n := <-opened:
+		t.Fatalf("unexpected second didOpen: %s", n.Params)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 // writeGoFile creates a temp .go file with content and returns its
 // absolute path. Files live for the duration of the test.
 func writeGoFile(t *testing.T, content string) string {
@@ -216,6 +267,40 @@ func TestBridge_SaveTrackedGo_NoExtraDidOpen(t *testing.T) {
 	case n := <-openSeen:
 		t.Fatalf("unexpected extra didOpen after Save: %s", n.Params)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestBridge_SaveTrackedGo_SendsDidSave(t *testing.T) {
+	f := newBridgeFixture(t)
+
+	openSeen := make(chan *Notification, 2)
+	f.server.HandleNotification(MethodTextDocumentDidOpen, func(n *Notification) {
+		openSeen <- n
+	})
+	saveSeen := make(chan *Notification, 2)
+	f.server.HandleNotification(MethodTextDocumentDidSave, func(n *Notification) {
+		saveSeen <- n
+	})
+
+	path := writeGoFile(t, "package x\n")
+	id, err := f.engine.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	waitForNotification(t, openSeen, bridgeRouteWait)
+
+	if err := f.engine.Save(context.Background(), id); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	saveN := waitForNotification(t, saveSeen, bridgeRouteWait)
+	var saveP DidSaveTextDocumentParams
+	if err := json.Unmarshal(saveN.Params, &saveP); err != nil {
+		t.Fatalf("unmarshal didSave: %v", err)
+	}
+	wantURI, _ := DocumentURIFromPath(path)
+	if saveP.TextDocument.URI != wantURI {
+		t.Errorf("didSave URI = %q, want %q", saveP.TextDocument.URI, wantURI)
 	}
 }
 

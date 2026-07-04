@@ -224,6 +224,34 @@ func (b *Bridge) ReplayOpenDocuments(ctx context.Context) error {
 	return nil
 }
 
+// OpenExistingBuffers opens every Go buffer already registered in the
+// engine that the bridge is not yet tracking, sending didOpen for each.
+//
+// It closes two gaps: buffers opened before the bridge (or its client)
+// existed never emitted a BufferOpened the bridge could observe, and a
+// restart supervisor needs to re-mirror the engine's open set onto a
+// fresh gopls. The engine is the source of truth for what is open, so
+// re-deriving from it keeps the two in sync without persisting bridge
+// state across restarts. Already-tracked buffers are skipped, making
+// this safe to call more than once.
+func (b *Bridge) OpenExistingBuffers(ctx context.Context) {
+	for _, ref := range b.engine.Buffers() {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		if ref.Path == "" || !isGoFile(ref.Path) {
+			continue
+		}
+		b.mu.Lock()
+		_, tracked := b.docs[ref.ID]
+		b.mu.Unlock()
+		if tracked {
+			continue
+		}
+		b.openDocument(ref.ID, ref.Path)
+	}
+}
+
 // HoverBuffer requests hover information for a tracked buffer at an
 // editor byte-position. Any returned range is translated back into
 // editor byte columns.
@@ -648,6 +676,21 @@ func (b *Bridge) onBufferSaved(e editor.BufferSaved) {
 	case doc.uri != newURI:
 		b.closeDocument(e.ID)
 		b.openDocument(e.ID, e.Path)
+	default:
+		// Plain save of an already-tracked Go document at the same URI:
+		// notify the server so it can re-run save-triggered analyses.
+		b.saveDocument(e.ID, newURI)
+	}
+}
+
+// saveDocument sends textDocument/didSave for a tracked document.
+func (b *Bridge) saveDocument(id editor.BufferID, uri DocumentURI) {
+	ctx, cancel := context.WithTimeout(b.ctx, bridgeRouteTimeout)
+	defer cancel()
+	if err := b.client.DidSave(ctx, uri); err != nil {
+		b.logger.Warn("bridge: DidSave failed",
+			"id", id, "uri", uri, "err", err,
+		)
 	}
 }
 

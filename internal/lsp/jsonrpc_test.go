@@ -6,10 +6,48 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 )
+
+func TestConn_WireLogging_TracesFramesAtDebug(t *testing.T) {
+	var logBuf bytes.Buffer
+	debugLogger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	var wire bytes.Buffer
+	writer := NewConn(ConnOptions{Writer: &wire, Logger: debugLogger})
+	if err := writer.Write(&Request{ID: NewIntID(7), Method: "textDocument/hover"}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	reader := NewConn(ConnOptions{Reader: &wire, Logger: debugLogger})
+	if _, err := reader.Read(); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	logs := logBuf.String()
+	for _, want := range []string{"jsonrpc frame", "dir=send", "dir=recv", "textDocument/hover", "id=7"} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("wire log missing %q; got:\n%s", want, logs)
+		}
+	}
+}
+
+func TestConn_WireLogging_SilentAboveDebug(t *testing.T) {
+	var logBuf bytes.Buffer
+	infoLogger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	var wire bytes.Buffer
+	conn := NewConn(ConnOptions{Writer: &wire, Logger: infoLogger})
+	if err := conn.Write(&Notification{Method: "textDocument/didSave"}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("expected no wire log at info level; got:\n%s", logBuf.String())
+	}
+}
 
 // roundTrip writes msg through a Conn into an in-memory buffer, then
 // reads it back through a fresh Conn over the same bytes. This avoids
