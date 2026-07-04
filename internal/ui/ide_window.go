@@ -30,19 +30,27 @@ var ErrNilWorkbench = errors.New("ui: nil workbench")
 
 // ideWindow holds the widgets and theme built once for the window's lifetime.
 type ideWindow struct {
-	theme  *IDETheme
-	tree   *IDETree
-	tabs   *IDETabs
-	editor *IDEEditor
+	theme     *IDETheme
+	tree      *IDETree
+	tabs      *IDETabs
+	editor    *IDEEditor
+	statusBar *IDEStatusBar
+	problems  *IDEProblems
+
+	// showProblems tracks whether the problems panel is expanded. It is
+	// toggled by Ctrl+M and by clicking the status bar's problem count.
+	showProblems bool
 }
 
 // newIDEWindow constructs the widget set for the IDE window.
 func newIDEWindow() *ideWindow {
 	return &ideWindow{
-		theme:  NewIDETheme(),
-		tree:   NewIDETree(),
-		tabs:   NewIDETabs(),
-		editor: NewIDEEditor(),
+		theme:     NewIDETheme(),
+		tree:      NewIDETree(),
+		tabs:      NewIDETabs(),
+		editor:    NewIDEEditor(),
+		statusBar: NewIDEStatusBar(),
+		problems:  NewIDEProblems(),
 	}
 }
 
@@ -100,14 +108,15 @@ func RunIDEWindow(ctx context.Context, wb *Workbench, opts IDEWindowOptions) err
 }
 
 // handleIDEKeys processes the window-level key bindings that are independent
-// of editor focus: Ctrl+W closes the active tab and Ctrl+F opens the find bar
-// (focusing its query field). Per-editor movement and text editing are handled
-// inside IDEEditor while it holds focus.
+// of editor focus: Ctrl+W closes the active tab, Ctrl+F opens the find bar
+// (focusing its query field), and Ctrl+M toggles the problems panel. Per-editor
+// movement and text editing are handled inside IDEEditor while it holds focus.
 func (v *ideWindow) handleIDEKeys(gtx layout.Context, wb *Workbench, w *gioapp.Window) {
 	for {
 		ev, ok := gtx.Event(
 			key.Filter{Name: key.Name("W"), Required: key.ModShortcut},
 			key.Filter{Name: key.Name("F"), Required: key.ModShortcut},
+			key.Filter{Name: key.Name("M"), Required: key.ModShortcut},
 		)
 		if !ok {
 			return
@@ -127,6 +136,9 @@ func (v *ideWindow) handleIDEKeys(gtx layout.Context, wb *Workbench, w *gioapp.W
 				v.editor.OpenFind(gtx)
 				w.Invalidate()
 			}
+		case key.Name("M"):
+			v.showProblems = !v.showProblems
+			w.Invalidate()
 		}
 	}
 }
@@ -153,7 +165,7 @@ func (v *ideWindow) layout(gtx layout.Context, wb *Workbench) bool {
 			return v.divider(gtx)
 		}),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			children := []layout.FlexChild{
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					dims, ch := v.tabs.Layout(gtx, v.theme, wb)
 					if ch {
@@ -168,10 +180,51 @@ func (v *ideWindow) layout(gtx layout.Context, wb *Workbench) bool {
 					}
 					return dims
 				}),
-			)
+			}
+			if v.showProblems {
+				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					dims, jump := v.problems.Layout(gtx, v.theme, wb)
+					if jump != nil && v.navigateTo(wb, jump) {
+						changed = true
+					}
+					return dims
+				}))
+			}
+			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				dims, toggled := v.statusBar.Layout(gtx, v.theme, wb)
+				if toggled {
+					v.showProblems = !v.showProblems
+					changed = true
+				}
+				return dims
+			}))
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 		}),
 	)
 	return changed
+}
+
+// navigateTo moves the caret to a problem's location and scrolls the editor so
+// the line is near the top of the viewport. The problems panel lists only the
+// active buffer's diagnostics, so the jump targets the active view; a mismatch
+// (or missing view) is a no-op. It reports whether it changed state.
+func (v *ideWindow) navigateTo(wb *Workbench, jump *problemJump) bool {
+	tab, ok := wb.ActiveTab()
+	if !ok || tab.BufferID != jump.BufferID {
+		return false
+	}
+	view, err := wb.ActiveView()
+	if err != nil || view == nil {
+		return false
+	}
+	if err := view.MoveTo(jump.Pos); err != nil {
+		return false
+	}
+	// Best-effort reveal: put the target line at the top of the viewport on
+	// the next frame, matching the find bar's scroll behavior.
+	v.editor.list.Position.First = jump.Pos.Line
+	v.editor.list.Position.Offset = 0
+	return true
 }
 
 // divider draws a 1px vertical separator sized to the available height.

@@ -21,6 +21,10 @@ import (
 // caretWidthPx is the on-screen thickness of the caret bar in pixels.
 const caretWidthPx = 2
 
+// diagnosticUnderlinePx is the on-screen thickness of a diagnostic underline
+// in pixels, drawn at the bottom edge of the row.
+const diagnosticUnderlinePx = 2
+
 // IDEEditor renders the active tab's buffer and edits it in place: a
 // line-number gutter, syntax-highlighted text, the current-line highlight,
 // selection overlays, find-match highlights and a caret. It owns the vertical
@@ -70,6 +74,14 @@ func (e *IDEEditor) Layout(gtx layout.Context, th *IDETheme, wb *Workbench) (lay
 
 	view, _ := wb.ActiveView()
 	spans := e.spansFor(tab, buf)
+
+	// Diagnostics for the active buffer, read synchronously once per frame.
+	// The controller may be absent (no language server); tolerate nil.
+	var diags []editor.Diagnostic
+	if c := wb.LSP(); c != nil {
+		diags = c.Diagnostics(tab.BufferID)
+	}
+
 	tabWidth := editorTabWidth(wb)
 	cell := th.CellWidth(gtx)
 	lineHeight := th.LineHeight(gtx)
@@ -104,6 +116,7 @@ func (e *IDEEditor) Layout(gtx layout.Context, th *IDETheme, wb *Workbench) (lay
 		selRange:    selRange,
 		haveSel:     haveSel,
 		findMatches: e.find.MatchesFor(buf),
+		diags:       diags,
 	}
 
 	dims := material.List(th.Theme, &e.list).Layout(gtx, buf.Lines(), func(gtx layout.Context, index int) layout.Dimensions {
@@ -176,6 +189,7 @@ type rowDraw struct {
 	selRange    editor.Range
 	haveSel     bool
 	findMatches []editor.Range
+	diags       []editor.Diagnostic
 }
 
 // line draws a single editor row: current-line highlight, gutter number,
@@ -209,6 +223,9 @@ func (rd rowDraw) line(gtx layout.Context, index int) layout.Dimensions {
 	if rd.haveCaret && index == rd.cursorLine {
 		rd.drawCaret(gtx, lineText)
 	}
+
+	// Diagnostic underlines sit on top of the text at the row's bottom edge.
+	rd.drawDiagnostics(gtx, index, lineText)
 
 	return layout.Dimensions{Size: rowSize}
 }
@@ -314,6 +331,55 @@ func (rd rowDraw) drawFindMatches(gtx layout.Context, index int, lineText string
 
 		stack := op.Offset(image.Pt(x0, 0)).Push(gtx.Ops)
 		paint.FillShape(gtx.Ops, rd.theme.FindHighlight, clip.Rect{Max: image.Point{X: x1 - x0, Y: rd.lineHeight}}.Op())
+		stack.Pop()
+	}
+}
+
+// drawDiagnostics draws a thin underline beneath every diagnostic span that
+// intersects this line. Each diagnostic is clipped to the line the same way a
+// selection is, so a diagnostic spanning several lines underlines each line it
+// touches. A straight 2px bar (rather than a wavy squiggle) is used: it reuses
+// the proven per-line clip/offset math, stays crisp at small cell sizes, and
+// avoids per-pixel path work on the hot per-row render path. The bar sits at
+// the bottom edge of the row and is colored by severity.
+func (rd rowDraw) drawDiagnostics(gtx layout.Context, index int, lineText string) {
+	thickness := diagnosticUnderlinePx
+	y := rd.lineHeight - thickness
+	if y < 0 {
+		y = 0
+	}
+	for _, d := range rd.diags {
+		start := d.Range.Start
+		end := d.Range.End
+		if index < start.Line || index > end.Line {
+			continue
+		}
+		startCol := 0
+		if index == start.Line {
+			startCol = start.Column
+		}
+		endByte := len(lineText)
+		extendEOL := index < end.Line
+		if index == end.Line {
+			endByte = end.Column
+		}
+
+		startVis := VisualColumn(lineText, startCol, rd.tabWidth)
+		endVis := VisualColumn(lineText, endByte, rd.tabWidth)
+		x0 := rd.gutterWidth + startVis*rd.cell
+		x1 := rd.gutterWidth + endVis*rd.cell
+		if extendEOL {
+			x1 += rd.cell
+		}
+		if x1 <= x0 {
+			// Zero-width or empty-line diagnostic: show at least one cell so
+			// the problem is still visible where it was reported.
+			x1 = x0 + rd.cell
+		}
+
+		stack := op.Offset(image.Pt(x0, y)).Push(gtx.Ops)
+		paint.FillShape(gtx.Ops, rd.theme.DiagnosticColor(d.Severity),
+			clip.Rect{Max: image.Point{X: x1 - x0, Y: thickness}}.Op())
 		stack.Pop()
 	}
 }

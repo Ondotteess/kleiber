@@ -14,6 +14,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget/material"
 
+	"github.com/Ondotteess/kleiber/internal/editor"
 	"github.com/Ondotteess/kleiber/internal/syntax"
 )
 
@@ -66,6 +67,18 @@ type IDETheme struct {
 	// AccentBar underlines the active tab.
 	Accent color.NRGBA
 
+	// StatusBar fills the bottom status bar background.
+	StatusBar color.NRGBA
+	// StatusText is the muted color of status-bar labels.
+	StatusText color.NRGBA
+	// DiagnosticError colors error underlines and problem-panel markers.
+	DiagnosticError color.NRGBA
+	// DiagnosticWarning colors warning underlines and markers.
+	DiagnosticWarning color.NRGBA
+	// DiagnosticInfo colors information/hint underlines and markers, and is
+	// the fallback for unknown severities.
+	DiagnosticInfo color.NRGBA
+
 	// cellWidthCache caches the measured cell width keyed by the metric and
 	// text size it was measured at, so the off-screen sample is laid out at
 	// most once per unique rendering context.
@@ -91,22 +104,43 @@ func NewIDETheme() *IDETheme {
 	th.TextSize = unit.Sp(ideTextSizeSp)
 
 	return &IDETheme{
-		Theme:           th,
-		Background:      rgb(0x1e1e1e),
-		Panel:           rgb(0x252526),
-		Gutter:          rgb(0x1e1e1e),
-		GutterText:      rgb(0x858585),
-		LineHighlight:   rgba(0xffffff, 0x14),
-		Selection:       rgba(0x264f78, 0x99),
-		FindHighlight:   rgba(0xea5c00, 0x66),
-		Caret:           rgb(0xaeafad),
-		Foreground:      rgb(0xd4d4d4),
-		Muted:           rgb(0x858585),
-		Divider:         rgb(0x333333),
-		ActiveTab:       rgb(0x1e1e1e),
-		Accent:          rgb(0x569cd6),
-		cellWidthCache:  map[cellMetricKey]int{},
-		lineHeightCache: map[cellMetricKey]int{},
+		Theme:             th,
+		Background:        rgb(0x1e1e1e),
+		Panel:             rgb(0x252526),
+		Gutter:            rgb(0x1e1e1e),
+		GutterText:        rgb(0x858585),
+		LineHighlight:     rgba(0xffffff, 0x14),
+		Selection:         rgba(0x264f78, 0x99),
+		FindHighlight:     rgba(0xea5c00, 0x66),
+		Caret:             rgb(0xaeafad),
+		Foreground:        rgb(0xd4d4d4),
+		Muted:             rgb(0x858585),
+		Divider:           rgb(0x333333),
+		ActiveTab:         rgb(0x1e1e1e),
+		Accent:            rgb(0x569cd6),
+		StatusBar:         rgb(0x252526),
+		StatusText:        rgb(0x9a9a9a),
+		DiagnosticError:   rgb(0xf14c4c),
+		DiagnosticWarning: rgb(0xcca700),
+		DiagnosticInfo:    rgb(0x3794ff),
+		cellWidthCache:    map[cellMetricKey]int{},
+		lineHeightCache:   map[cellMetricKey]int{},
+	}
+}
+
+// DiagnosticColor maps a diagnostic severity to its display color. Errors,
+// warnings, and information map to their dedicated colors; hint and unknown
+// severities fall back to the information color so every diagnostic is
+// visible.
+func (t *IDETheme) DiagnosticColor(sev editor.DiagnosticSeverity) color.NRGBA {
+	switch sev {
+	case editor.DiagnosticSeverityError:
+		return t.DiagnosticError
+	case editor.DiagnosticSeverityWarning:
+		return t.DiagnosticWarning
+	default:
+		// Information, Hint, and Unknown all read as informational.
+		return t.DiagnosticInfo
 	}
 }
 
