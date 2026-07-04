@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -79,8 +80,12 @@ type BridgeOptions struct {
 //   - Only buffers with a non-empty path are forwarded. Untitled
 //     buffers are skipped until SaveAs gives them a Go path.
 //   - Only .go files are forwarded. gopls rejects other extensions.
-//   - Document sync is full-text per change. Incremental sync lands
-//     when the editor exposes structured edits to subscribers.
+//   - Document sync is incremental when the server negotiates
+//     TextDocumentSyncIncremental: plain inserts and deletes become
+//     ranged didChange events computed against a per-document shadow
+//     text. Undo/redo, sequence gaps, shadow mismatches, and servers
+//     that did not negotiate incremental sync all fall back to a
+//     full-text didChange.
 type Bridge struct {
 	logger *slog.Logger
 	client *Client
@@ -97,9 +102,22 @@ type Bridge struct {
 }
 
 // managedDoc is the bridge's per-buffer record.
+//
+// shadow mirrors the document text as last sent to the language
+// server, and lastSeq is the engine buffer Seq() that text corresponds
+// to. Both are guarded by Bridge.mu for memory safety. During normal
+// editing the engine-event goroutine (runEngineLoop) is the only
+// writer, so the incremental-change decision it makes against its own
+// last write is race-free; openDocument and ReplayOpenDocuments
+// re-anchor the pair whenever a didOpen is (re-)sent. Read paths such
+// as trackedPosition and TrackedDocuments consult live engine buffers,
+// never the shadow.
 type managedDoc struct {
 	uri     DocumentURI
 	version atomic.Int32
+
+	shadow  string
+	lastSeq int
 }
 
 // EditorHover is hover content translated to editor-native coordinates.
@@ -128,6 +146,11 @@ type TrackedDocument struct {
 	Path     string
 	Version  int
 	Text     string
+
+	// Seq is the engine buffer's mutation sequence captured together
+	// with Text. Replaying the snapshot re-anchors the bridge's
+	// incremental-sync shadow on this (Text, Seq) pair.
+	Seq int
 }
 
 // NewBridge constructs a Bridge and starts its background goroutines.
@@ -194,13 +217,14 @@ func (b *Bridge) TrackedDocuments() []TrackedDocument {
 			)
 			continue
 		}
-		text, _ := bufferSnapshot(buf)
+		text, seq := bufferSnapshot(buf)
 		out = append(out, TrackedDocument{
 			BufferID: ref.id,
 			URI:      ref.uri,
 			Path:     path,
 			Version:  ref.version,
 			Text:     text,
+			Seq:      seq,
 		})
 	}
 	return out
@@ -209,8 +233,9 @@ func (b *Bridge) TrackedDocuments() []TrackedDocument {
 // ReplayOpenDocuments re-sends didOpen for every currently tracked Go document
 // using the latest editor buffer text. gopls treats didOpen as version 1, so
 // successful replays reset the bridge's per-document version to 1 before future
-// didChange messages are sent. This helper is a restart boundary, not an
-// automatic restart loop.
+// didChange messages are sent, and re-anchor the incremental-sync shadow on the
+// replayed snapshot. This helper is a restart boundary, not an automatic
+// restart loop.
 func (b *Bridge) ReplayOpenDocuments(ctx context.Context) error {
 	for _, doc := range b.TrackedDocuments() {
 		reqCtx, cancel := context.WithTimeout(ctx, bridgeRouteTimeout)
@@ -219,7 +244,7 @@ func (b *Bridge) ReplayOpenDocuments(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("lsp: replaying tracked document %s: %w", doc.URI, err)
 		}
-		b.resetVersionAfterReplay(doc.BufferID, doc.URI)
+		b.resetVersionAfterReplay(doc)
 	}
 	return nil
 }
@@ -407,11 +432,16 @@ func (b *Bridge) trackedDocumentRefs() []trackedDocumentRef {
 	return refs
 }
 
-func (b *Bridge) resetVersionAfterReplay(id editor.BufferID, uri DocumentURI) {
+// resetVersionAfterReplay resets a document's LSP version to 1 after a
+// didOpen replay and re-anchors the incremental-sync shadow on the
+// exact (Text, Seq) snapshot that was replayed.
+func (b *Bridge) resetVersionAfterReplay(replayed TrackedDocument) {
 	b.mu.Lock()
-	doc, ok := b.docs[id]
-	if ok && doc.uri == uri {
+	doc, ok := b.docs[replayed.BufferID]
+	if ok && doc.uri == replayed.URI {
 		doc.version.Store(1)
+		doc.shadow = replayed.Text
+		doc.lastSeq = replayed.Seq
 	}
 	b.mu.Unlock()
 }
@@ -594,9 +624,9 @@ func (b *Bridge) openDocument(id editor.BufferID, path string) {
 		)
 		return
 	}
-	text := buf.Text()
+	text, seq := bufferSnapshot(buf)
 
-	doc := &managedDoc{uri: uri}
+	doc := &managedDoc{uri: uri, shadow: text, lastSeq: seq}
 	doc.version.Store(1)
 
 	b.mu.Lock()
@@ -618,11 +648,21 @@ func (b *Bridge) openDocument(id editor.BufferID, path string) {
 	}
 }
 
-// onBufferChanged forwards every BufferChanged event as a full-text
-// textDocument/didChange. Buffers the bridge never opened are ignored.
+// onBufferChanged forwards a BufferChanged event as textDocument/
+// didChange. When the server negotiated incremental sync and the
+// change applies cleanly on top of the shadow text, a single ranged
+// content change is sent; every other case (full-sync servers,
+// undo/redo, sequence gaps, shadow mismatches, send errors) resyncs
+// the full document. Buffers the bridge never opened are ignored.
 func (b *Bridge) onBufferChanged(e editor.BufferChanged) {
 	b.mu.Lock()
 	doc, ok := b.docs[e.ID]
+	var shadow string
+	var lastSeq int
+	if ok {
+		shadow = doc.shadow
+		lastSeq = doc.lastSeq
+	}
 	b.mu.Unlock()
 	if !ok {
 		return
@@ -632,7 +672,49 @@ func (b *Bridge) onBufferChanged(e editor.BufferChanged) {
 	if err != nil {
 		return
 	}
-	text := buf.Text()
+
+	if b.client.SyncMode() == TextDocumentSyncIncremental {
+		err := b.sendIncrementalChange(doc, shadow, lastSeq, e.Change)
+		if err == nil {
+			return
+		}
+		b.logger.Debug("bridge: incremental didChange fallback",
+			"uri", doc.uri, "kind", e.Change.Kind.String(), "err", err,
+		)
+	}
+	b.resyncFullText(doc, buf)
+}
+
+// sendIncrementalChange translates one buffer change into a ranged
+// textDocument/didChange computed against the shadow text. A non-nil
+// error means the caller must fall back to a full-text resync; the
+// shadow advances only after the ranged event has been sent.
+func (b *Bridge) sendIncrementalChange(doc *managedDoc, shadow string, lastSeq int, change editor.Change) error {
+	event, newShadow, err := incrementalChange(shadow, lastSeq, change)
+	if err != nil {
+		return err
+	}
+
+	v := doc.version.Add(1)
+	ctx, cancel := context.WithTimeout(b.ctx, bridgeRouteTimeout)
+	defer cancel()
+	if err := b.client.DidChangeEvents(ctx, doc.uri, int(v), []TextDocumentContentChangeEvent{event}); err != nil {
+		return fmt.Errorf("lsp: sending incremental didChange: %w", err)
+	}
+
+	b.mu.Lock()
+	doc.shadow = newShadow
+	doc.lastSeq = change.Seq
+	b.mu.Unlock()
+	return nil
+}
+
+// resyncFullText sends a full-text didChange for doc from a fresh
+// buffer snapshot and re-anchors the shadow text on that snapshot. It
+// is the path for full-sync servers, undo/redo, sequence gaps, and any
+// incremental translation or send failure.
+func (b *Bridge) resyncFullText(doc *managedDoc, buf *editor.Buffer) {
+	text, seq := bufferSnapshot(buf)
 
 	v := doc.version.Add(1)
 	ctx, cancel := context.WithTimeout(b.ctx, bridgeRouteTimeout)
@@ -642,6 +724,79 @@ func (b *Bridge) onBufferChanged(e editor.BufferChanged) {
 			"uri", doc.uri, "err", err,
 		)
 	}
+
+	b.mu.Lock()
+	doc.shadow = text
+	doc.lastSeq = seq
+	b.mu.Unlock()
+}
+
+// incrementalChange computes the single LSP content-change event that
+// applies change on top of shadow, plus the resulting shadow text. A
+// non-nil error signals that the change cannot be expressed safely as
+// a ranged edit — undo/redo kinds are always resynced in full, the
+// change's Seq must directly follow the shadow's, and the shadow must
+// contain exactly the change's pre-edit Removed text at the pre-edit
+// Range — and the caller must resend the full document instead.
+func incrementalChange(shadow string, lastSeq int, change editor.Change) (TextDocumentContentChangeEvent, string, error) {
+	if change.Kind != editor.ChangeKindInsert && change.Kind != editor.ChangeKindDelete {
+		return TextDocumentContentChangeEvent{}, "", fmt.Errorf(
+			"lsp: change kind %s always resyncs full text", change.Kind)
+	}
+	if change.Seq != lastSeq+1 {
+		return TextDocumentContentChangeEvent{}, "", fmt.Errorf(
+			"lsp: change seq %d does not directly follow shadow seq %d", change.Seq, lastSeq)
+	}
+
+	r := change.Edit.Range.Normalized()
+	startOff, err := byteOffsetInText(shadow, r.Start)
+	if err != nil {
+		return TextDocumentContentChangeEvent{}, "", err
+	}
+	endOff, err := byteOffsetInText(shadow, r.End)
+	if err != nil {
+		return TextDocumentContentChangeEvent{}, "", err
+	}
+	if startOff > endOff || shadow[startOff:endOff] != change.Edit.Removed {
+		return TextDocumentContentChangeEvent{}, "", fmt.Errorf(
+			"lsp: shadow text disagrees with change at bytes %d..%d", startOff, endOff)
+	}
+
+	lspRange, err := RangeFromByteRange(shadow, r.Start.Line, r.Start.Column, r.End.Line, r.End.Column)
+	if err != nil {
+		return TextDocumentContentChangeEvent{}, "", err
+	}
+	event := TextDocumentContentChangeEvent{
+		Range: &lspRange,
+		Text:  change.Edit.Inserted,
+	}
+	return event, shadow[:startOff] + change.Edit.Inserted + shadow[endOff:], nil
+}
+
+// byteOffsetInText resolves an editor byte-position against text,
+// returning the absolute byte offset. Line accounting mirrors lineAt:
+// a trailing newline yields a final empty line, and Column may equal
+// the line length (the insertion point after its last byte).
+func byteOffsetInText(text string, pos editor.Position) (int, error) {
+	if pos.Line < 0 || pos.Column < 0 {
+		return 0, fmt.Errorf("%w: line=%d column=%d", ErrPositionOutOfBounds, pos.Line, pos.Column)
+	}
+	lineStart := 0
+	for line := 0; line < pos.Line; line++ {
+		nl := strings.IndexByte(text[lineStart:], '\n')
+		if nl < 0 {
+			return 0, fmt.Errorf("%w: line=%d", ErrPositionOutOfBounds, pos.Line)
+		}
+		lineStart += nl + 1
+	}
+	lineLen := len(text) - lineStart
+	if nl := strings.IndexByte(text[lineStart:], '\n'); nl >= 0 {
+		lineLen = nl
+	}
+	if pos.Column > lineLen {
+		return 0, fmt.Errorf("%w: column=%d line-length=%d", ErrPositionOutOfBounds, pos.Column, lineLen)
+	}
+	return lineStart + pos.Column, nil
 }
 
 // onBufferSaved reconciles bridge tracking after SaveAs. A plain save
@@ -878,6 +1033,19 @@ func (b *Bridge) versionFor(id editor.BufferID) int {
 		return 0
 	}
 	return int(doc.version.Load())
+}
+
+// shadowFor returns the shadow text and its buffer sequence for the
+// buffer, or ("", 0) if the bridge does not track it. Package-internal
+// — used by tests to synchronize on shadow updates.
+func (b *Bridge) shadowFor(id editor.BufferID) (string, int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	doc, ok := b.docs[id]
+	if !ok {
+		return "", 0
+	}
+	return doc.shadow, doc.lastSeq
 }
 
 // uriFor returns the LSP URI for the buffer, or "" if the bridge does

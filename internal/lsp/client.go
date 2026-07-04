@@ -107,6 +107,11 @@ type Client struct {
 
 	diagnostics *events.Topic[DiagnosticsEvent]
 
+	// syncMode holds the TextDocumentSyncKind negotiated during the
+	// initialize handshake. Written once before Start returns; atomic
+	// so callers racing with Start observe a consistent value.
+	syncMode atomic.Int32
+
 	started      atomic.Bool
 	stopping     atomic.Bool
 	readLoopDone chan struct{}
@@ -251,11 +256,35 @@ func (c *Client) handshake(ctx context.Context) error {
 			"version", result.ServerInfo.Version,
 		)
 	}
+	c.storeSyncMode(result.Capabilities)
 
 	if err := c.notify(MethodInitialized, InitializedParams{}); err != nil {
 		return fmt.Errorf("lsp: sending initialized: %w", err)
 	}
 	return nil
+}
+
+// storeSyncMode records the document-sync kind negotiated during the
+// initialize handshake. An absent or undecodable capability falls back
+// to TextDocumentSyncFull — Kleiber's conservative default of resending
+// the entire document on every change.
+func (c *Client) storeSyncMode(caps ServerCapabilities) {
+	mode := TextDocumentSyncFull
+	if kind, ok, err := caps.TextDocumentSyncMode(); err != nil {
+		c.logger.Warn("decoding textDocumentSync capability", "err", err)
+	} else if ok {
+		mode = kind
+	}
+	c.syncMode.Store(int32(mode))
+}
+
+// SyncMode reports the textDocument sync kind negotiated with the
+// server. The handshake completes before Start returns, so the value is
+// stable for the client's whole document lifetime; before a successful
+// Start it reports TextDocumentSyncNone. Servers that omit the
+// capability are treated as TextDocumentSyncFull.
+func (c *Client) SyncMode() TextDocumentSyncKind {
+	return TextDocumentSyncKind(c.syncMode.Load())
 }
 
 // Stop performs the LSP shutdown sequence (shutdown request → exit
@@ -334,6 +363,26 @@ func (c *Client) DidChange(ctx context.Context, uri DocumentURI, version int, te
 		ContentChanges: []TextDocumentContentChangeEvent{{
 			Text: text,
 		}},
+	})
+}
+
+// DidChangeEvents tells the server that a document changed, forwarding
+// the supplied content-change events verbatim. Callers that negotiated
+// TextDocumentSyncIncremental use it to send ranged edits; DidChange
+// remains the full-text convenience wrapper.
+func (c *Client) DidChangeEvents(ctx context.Context, uri DocumentURI, version int, changes []TextDocumentContentChangeEvent) error {
+	if !c.started.Load() {
+		return ErrClientNotStarted
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return c.notify(MethodTextDocumentDidChange, DidChangeTextDocumentParams{
+		TextDocument: VersionedTextDocumentIdentifier{
+			URI:     uri,
+			Version: version,
+		},
+		ContentChanges: changes,
 	})
 }
 

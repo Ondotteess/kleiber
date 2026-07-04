@@ -33,7 +33,15 @@ type bridgeFixture struct {
 
 func newBridgeFixture(t *testing.T) *bridgeFixture {
 	t.Helper()
-	client, server := connectedClient(t)
+	return newBridgeFixtureWith(t, nil)
+}
+
+// newBridgeFixtureWith is newBridgeFixture with a hook to reconfigure
+// the fakeServer before the handshake runs (nil keeps the defaults,
+// whose empty capabilities negotiate full-text sync).
+func newBridgeFixtureWith(t *testing.T, configure func(*fakeServer)) *bridgeFixture {
+	t.Helper()
+	client, server := connectedClientWith(t, configure)
 	engine := editor.NewEngine(editor.EngineOptions{Logger: testLogger(t)})
 	bridge := NewBridge(context.Background(), BridgeOptions{Logger: testLogger(t)},
 		client, engine)
@@ -45,6 +53,98 @@ func newBridgeFixture(t *testing.T) *bridgeFixture {
 		server: server,
 		bridge: bridge,
 	}
+}
+
+// newIncrementalBridgeFixture is newBridgeFixture against a fakeServer
+// whose initialize result negotiates TextDocumentSyncIncremental in
+// the options-object form gopls uses.
+func newIncrementalBridgeFixture(t *testing.T) *bridgeFixture {
+	t.Helper()
+	sync, err := json.Marshal(TextDocumentSyncOptions{
+		OpenClose: true,
+		Change:    TextDocumentSyncIncremental,
+	})
+	if err != nil {
+		t.Fatalf("marshal TextDocumentSyncOptions: %v", err)
+	}
+	result, err := json.Marshal(InitializeResult{
+		ServerInfo:   &ServerInfo{Name: "fake", Version: "0.0.0"},
+		Capabilities: ServerCapabilities{TextDocumentSync: sync},
+	})
+	if err != nil {
+		t.Fatalf("marshal InitializeResult: %v", err)
+	}
+	return newBridgeFixtureWith(t, func(s *fakeServer) {
+		s.Handle(MethodInitialize, func(req *Request) *Response {
+			return &Response{ID: req.ID, Result: result}
+		})
+	})
+}
+
+// openTrackedGoFile writes content to a temp .go file, opens it in the
+// engine, and waits for the bridge to send didOpen. Returns the buffer
+// ID.
+func (f *bridgeFixture) openTrackedGoFile(content string) editor.BufferID {
+	f.t.Helper()
+	openSeen := make(chan *Notification, 2)
+	f.server.HandleNotification(MethodTextDocumentDidOpen, func(n *Notification) {
+		openSeen <- n
+	})
+	path := writeGoFile(f.t, content)
+	id, err := f.engine.Open(context.Background(), path)
+	if err != nil {
+		f.t.Fatalf("Open: %v", err)
+	}
+	waitForNotification(f.t, openSeen, bridgeRouteWait)
+	return id
+}
+
+// collectDidChanges routes every didChange notification the fake
+// server receives into the returned channel.
+func (f *bridgeFixture) collectDidChanges(buffer int) chan *Notification {
+	f.t.Helper()
+	ch := make(chan *Notification, buffer)
+	f.server.HandleNotification(MethodTextDocumentDidChange, func(n *Notification) {
+		ch <- n
+	})
+	return ch
+}
+
+// mustBuffer fetches the engine buffer for id or fails the test.
+func (f *bridgeFixture) mustBuffer(id editor.BufferID) *editor.Buffer {
+	f.t.Helper()
+	buf, err := f.engine.Buffer(id)
+	if err != nil {
+		f.t.Fatalf("Buffer: %v", err)
+	}
+	return buf
+}
+
+// decodeDidChange unmarshals a didChange notification's params.
+func decodeDidChange(t *testing.T, n *Notification) DidChangeTextDocumentParams {
+	t.Helper()
+	var p DidChangeTextDocumentParams
+	if err := json.Unmarshal(n.Params, &p); err != nil {
+		t.Fatalf("unmarshal didChange: %v", err)
+	}
+	return p
+}
+
+// waitForShadow polls until the bridge's shadow text for id equals
+// want or the deadline fires. The shadow is updated shortly after the
+// corresponding didChange hits the wire, so tests synchronize on it
+// before exercising shadow-dependent behavior across goroutines.
+func waitForShadow(t *testing.T, b *Bridge, id editor.BufferID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(bridgeRouteWait)
+	for time.Now().Before(deadline) {
+		if shadow, _ := b.shadowFor(id); shadow == want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	shadow, seq := b.shadowFor(id)
+	t.Fatalf("shadow = %q (seq %d), want %q", shadow, seq, want)
 }
 
 func TestBridge_OpenExistingBuffers_OpensPreexistingGoBuffer(t *testing.T) {
@@ -495,6 +595,447 @@ func TestBridge_BufferChanged_MonotonicVersion(t *testing.T) {
 		if got[i] != v {
 			t.Errorf("didChange[%d].Version = %d, want %d", i, got[i], v)
 		}
+	}
+}
+
+// --- incremental didChange ------------------------------------------
+
+func TestBridge_BufferChanged_IncrementalAsciiInsert(t *testing.T) {
+	f := newIncrementalBridgeFixture(t)
+	changes := f.collectDidChanges(4)
+	id := f.openTrackedGoFile("package x\n")
+	buf := f.mustBuffer(id)
+
+	if _, err := buf.Insert(editor.Position{Line: 1, Column: 0}, "var a = 1\n"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	p := decodeDidChange(t, waitForNotification(t, changes, bridgeRouteWait))
+	if p.TextDocument.Version != 2 {
+		t.Errorf("Version = %d, want 2", p.TextDocument.Version)
+	}
+	if len(p.ContentChanges) != 1 {
+		t.Fatalf("ContentChanges len = %d, want 1", len(p.ContentChanges))
+	}
+	want := Range{Start: Position{Line: 1, Character: 0}, End: Position{Line: 1, Character: 0}}
+	if p.ContentChanges[0].Range == nil || *p.ContentChanges[0].Range != want {
+		t.Errorf("Range = %+v, want %+v", p.ContentChanges[0].Range, want)
+	}
+	if p.ContentChanges[0].Text != "var a = 1\n" {
+		t.Errorf("Text = %q, want inserted text only", p.ContentChanges[0].Text)
+	}
+
+	// A second insert must land on the updated shadow: line 1 now
+	// holds "var a = 1", so byte column 9 exists there.
+	if _, err := buf.Insert(editor.Position{Line: 1, Column: 9}, "6"); err != nil {
+		t.Fatalf("second Insert: %v", err)
+	}
+	p2 := decodeDidChange(t, waitForNotification(t, changes, bridgeRouteWait))
+	if p2.TextDocument.Version != 3 {
+		t.Errorf("second Version = %d, want 3", p2.TextDocument.Version)
+	}
+	want2 := Range{Start: Position{Line: 1, Character: 9}, End: Position{Line: 1, Character: 9}}
+	if len(p2.ContentChanges) != 1 || p2.ContentChanges[0].Range == nil || *p2.ContentChanges[0].Range != want2 {
+		t.Fatalf("second ContentChanges = %+v, want ranged insert at %+v", p2.ContentChanges, want2)
+	}
+	if p2.ContentChanges[0].Text != "6" {
+		t.Errorf("second Text = %q, want 6", p2.ContentChanges[0].Text)
+	}
+	waitForShadow(t, f.bridge, id, "package x\nvar a = 16\n")
+}
+
+func TestBridge_BufferChanged_IncrementalAsciiDelete(t *testing.T) {
+	f := newIncrementalBridgeFixture(t)
+	changes := f.collectDidChanges(2)
+	id := f.openTrackedGoFile("package x\nvar a = 1\n")
+	buf := f.mustBuffer(id)
+
+	// Remove the "a" in "var a = 1".
+	if _, err := buf.Delete(editor.Range{
+		Start: editor.Position{Line: 1, Column: 4},
+		End:   editor.Position{Line: 1, Column: 5},
+	}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	p := decodeDidChange(t, waitForNotification(t, changes, bridgeRouteWait))
+	if len(p.ContentChanges) != 1 {
+		t.Fatalf("ContentChanges len = %d, want 1", len(p.ContentChanges))
+	}
+	want := Range{Start: Position{Line: 1, Character: 4}, End: Position{Line: 1, Character: 5}}
+	if p.ContentChanges[0].Range == nil || *p.ContentChanges[0].Range != want {
+		t.Errorf("Range = %+v, want %+v", p.ContentChanges[0].Range, want)
+	}
+	if p.ContentChanges[0].Text != "" {
+		t.Errorf("Text = %q, want empty for delete", p.ContentChanges[0].Text)
+	}
+	waitForShadow(t, f.bridge, id, "package x\nvar  = 1\n")
+}
+
+func TestBridge_BufferChanged_IncrementalUnicodeOffsets(t *testing.T) {
+	// Line 1: "// " (3 bytes / 3 UTF-16 units), Cyrillic п (2 bytes /
+	// 1 unit), emoji U+1F600 (4 bytes / 2 units), then "z".
+	line := "// п\U0001F600z"
+	cases := []struct {
+		name          string
+		byteCol       int
+		wantCharacter int
+	}{
+		{"after cyrillic", 3 + len("п"), 4},
+		{"after emoji", 3 + len("п") + len("\U0001F600"), 6},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newIncrementalBridgeFixture(t)
+			changes := f.collectDidChanges(2)
+			id := f.openTrackedGoFile("package x\n" + line + "\n")
+			buf := f.mustBuffer(id)
+
+			if _, err := buf.Insert(editor.Position{Line: 1, Column: tc.byteCol}, "q"); err != nil {
+				t.Fatalf("Insert: %v", err)
+			}
+
+			p := decodeDidChange(t, waitForNotification(t, changes, bridgeRouteWait))
+			if len(p.ContentChanges) != 1 {
+				t.Fatalf("ContentChanges len = %d, want 1", len(p.ContentChanges))
+			}
+			want := Range{
+				Start: Position{Line: 1, Character: tc.wantCharacter},
+				End:   Position{Line: 1, Character: tc.wantCharacter},
+			}
+			if p.ContentChanges[0].Range == nil || *p.ContentChanges[0].Range != want {
+				t.Errorf("Range = %+v, want %+v", p.ContentChanges[0].Range, want)
+			}
+			if p.ContentChanges[0].Text != "q" {
+				t.Errorf("Text = %q, want q", p.ContentChanges[0].Text)
+			}
+		})
+	}
+}
+
+func TestBridge_BufferChanged_IncrementalMultiLineDelete(t *testing.T) {
+	f := newIncrementalBridgeFixture(t)
+	changes := f.collectDidChanges(2)
+	id := f.openTrackedGoFile("package x\nvar a = 1\nvar b = 2\n")
+	buf := f.mustBuffer(id)
+
+	// Delete from the end of line 0 into line 1, crossing the "\n".
+	if _, err := buf.Delete(editor.Range{
+		Start: editor.Position{Line: 0, Column: 9},
+		End:   editor.Position{Line: 1, Column: 3},
+	}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	p := decodeDidChange(t, waitForNotification(t, changes, bridgeRouteWait))
+	if len(p.ContentChanges) != 1 {
+		t.Fatalf("ContentChanges len = %d, want 1", len(p.ContentChanges))
+	}
+	want := Range{Start: Position{Line: 0, Character: 9}, End: Position{Line: 1, Character: 3}}
+	if p.ContentChanges[0].Range == nil || *p.ContentChanges[0].Range != want {
+		t.Errorf("Range = %+v, want %+v", p.ContentChanges[0].Range, want)
+	}
+	if p.ContentChanges[0].Text != "" {
+		t.Errorf("Text = %q, want empty for delete", p.ContentChanges[0].Text)
+	}
+	waitForShadow(t, f.bridge, id, "package x a = 1\nvar b = 2\n")
+}
+
+func TestBridge_BufferChanged_UndoTriggersFullResync(t *testing.T) {
+	f := newIncrementalBridgeFixture(t)
+	changes := f.collectDidChanges(4)
+	id := f.openTrackedGoFile("package x\n")
+	buf := f.mustBuffer(id)
+
+	if _, err := buf.Insert(editor.Position{Line: 1, Column: 0}, "var a = 1\n"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	first := decodeDidChange(t, waitForNotification(t, changes, bridgeRouteWait))
+	if len(first.ContentChanges) != 1 || first.ContentChanges[0].Range == nil {
+		t.Fatalf("insert ContentChanges = %+v, want one ranged change", first.ContentChanges)
+	}
+
+	if _, ok := buf.Undo(); !ok {
+		t.Fatal("Undo returned false")
+	}
+	n := waitForNotification(t, changes, bridgeRouteWait)
+	p := decodeDidChange(t, n)
+	if p.TextDocument.Version != 3 {
+		t.Errorf("undo Version = %d, want 3", p.TextDocument.Version)
+	}
+	if len(p.ContentChanges) != 1 {
+		t.Fatalf("undo ContentChanges len = %d, want 1", len(p.ContentChanges))
+	}
+	if p.ContentChanges[0].Range != nil {
+		t.Errorf("undo Range = %+v, want nil (full text)", p.ContentChanges[0].Range)
+	}
+	if p.ContentChanges[0].Text != "package x\n" {
+		t.Errorf("undo Text = %q, want full document", p.ContentChanges[0].Text)
+	}
+	if strings.Contains(string(n.Params), `"range"`) {
+		t.Errorf("undo wire params contain a range field: %s", n.Params)
+	}
+
+	// The full resync re-anchors the shadow, so the next plain insert
+	// goes incremental again.
+	if _, err := buf.Insert(editor.Position{Line: 1, Column: 0}, "var b = 2\n"); err != nil {
+		t.Fatalf("Insert after undo: %v", err)
+	}
+	p2 := decodeDidChange(t, waitForNotification(t, changes, bridgeRouteWait))
+	want := Range{Start: Position{Line: 1, Character: 0}, End: Position{Line: 1, Character: 0}}
+	if len(p2.ContentChanges) != 1 || p2.ContentChanges[0].Range == nil || *p2.ContentChanges[0].Range != want {
+		t.Fatalf("post-undo ContentChanges = %+v, want ranged insert at %+v", p2.ContentChanges, want)
+	}
+}
+
+func TestBridge_BufferChanged_FullSyncServer_NoRange(t *testing.T) {
+	f := newBridgeFixture(t)
+	changes := f.collectDidChanges(2)
+	id := f.openTrackedGoFile("package x\n")
+	buf := f.mustBuffer(id)
+
+	if _, err := buf.Insert(editor.Position{Line: 1, Column: 0}, "var a = 1\n"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	n := waitForNotification(t, changes, bridgeRouteWait)
+	p := decodeDidChange(t, n)
+	if len(p.ContentChanges) != 1 {
+		t.Fatalf("ContentChanges len = %d, want 1", len(p.ContentChanges))
+	}
+	if p.ContentChanges[0].Range != nil {
+		t.Errorf("Range = %+v, want nil for full-sync server", p.ContentChanges[0].Range)
+	}
+	if p.ContentChanges[0].Text != "package x\nvar a = 1\n" {
+		t.Errorf("Text = %q, want full document", p.ContentChanges[0].Text)
+	}
+	if strings.Contains(string(n.Params), `"range"`) {
+		t.Errorf("full-sync wire params contain a range field: %s", n.Params)
+	}
+}
+
+func TestBridge_ReplayOpenDocuments_ReanchorsIncrementalShadow(t *testing.T) {
+	f := newIncrementalBridgeFixture(t)
+	changes := f.collectDidChanges(4)
+	id := f.openTrackedGoFile("package x\n")
+	buf := f.mustBuffer(id)
+
+	if _, err := buf.Insert(editor.Position{Line: 1, Column: 0}, "var a = 1\n"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	waitForNotification(t, changes, bridgeRouteWait)
+	waitForShadow(t, f.bridge, id, "package x\nvar a = 1\n")
+
+	if err := f.bridge.ReplayOpenDocuments(context.Background()); err != nil {
+		t.Fatalf("ReplayOpenDocuments: %v", err)
+	}
+	if got := f.bridge.versionFor(id); got != 1 {
+		t.Fatalf("version after replay = %d, want 1", got)
+	}
+
+	// The shadow was re-anchored on the replayed snapshot, so the next
+	// insert goes incremental against version 1.
+	if _, err := buf.Insert(editor.Position{Line: 2, Column: 0}, "var b = 2\n"); err != nil {
+		t.Fatalf("Insert after replay: %v", err)
+	}
+	p := decodeDidChange(t, waitForNotification(t, changes, bridgeRouteWait))
+	if p.TextDocument.Version != 2 {
+		t.Errorf("post-replay Version = %d, want 2", p.TextDocument.Version)
+	}
+	want := Range{Start: Position{Line: 2, Character: 0}, End: Position{Line: 2, Character: 0}}
+	if len(p.ContentChanges) != 1 || p.ContentChanges[0].Range == nil || *p.ContentChanges[0].Range != want {
+		t.Fatalf("post-replay ContentChanges = %+v, want ranged insert at %+v", p.ContentChanges, want)
+	}
+	if p.ContentChanges[0].Text != "var b = 2\n" {
+		t.Errorf("post-replay Text = %q, want inserted text only", p.ContentChanges[0].Text)
+	}
+}
+
+// --- incremental change translation (pure) --------------------------
+
+func TestIncrementalChange(t *testing.T) {
+	insert := func(line, col int, text string, seq int) editor.Change {
+		pos := editor.Position{Line: line, Column: col}
+		return editor.Change{
+			Kind: editor.ChangeKindInsert,
+			Edit: editor.Edit{Range: editor.Range{Start: pos, End: pos}, Inserted: text},
+			Seq:  seq,
+		}
+	}
+	del := func(startLine, startCol, endLine, endCol int, removed string, seq int) editor.Change {
+		return editor.Change{
+			Kind: editor.ChangeKindDelete,
+			Edit: editor.Edit{
+				Range: editor.Range{
+					Start: editor.Position{Line: startLine, Column: startCol},
+					End:   editor.Position{Line: endLine, Column: endCol},
+				},
+				Removed: removed,
+			},
+			Seq: seq,
+		}
+	}
+
+	cases := []struct {
+		name       string
+		shadow     string
+		lastSeq    int
+		change     editor.Change
+		wantErr    bool
+		wantRange  Range
+		wantText   string
+		wantShadow string
+	}{
+		{
+			name:       "ascii insert mid line",
+			shadow:     "ab\ncd\n",
+			lastSeq:    4,
+			change:     insert(1, 1, "X", 5),
+			wantRange:  Range{Start: Position{Line: 1, Character: 1}, End: Position{Line: 1, Character: 1}},
+			wantText:   "X",
+			wantShadow: "ab\ncXd\n",
+		},
+		{
+			name:       "insert at end of unterminated text",
+			shadow:     "ab",
+			lastSeq:    0,
+			change:     insert(0, 2, "c", 1),
+			wantRange:  Range{Start: Position{Line: 0, Character: 2}, End: Position{Line: 0, Character: 2}},
+			wantText:   "c",
+			wantShadow: "abc",
+		},
+		{
+			name:       "delete across newline",
+			shadow:     "ab\ncd\n",
+			lastSeq:    1,
+			change:     del(0, 1, 1, 1, "b\nc", 2),
+			wantRange:  Range{Start: Position{Line: 0, Character: 1}, End: Position{Line: 1, Character: 1}},
+			wantText:   "",
+			wantShadow: "ad\n",
+		},
+		{
+			name:       "insert after astral rune counts utf16 units",
+			shadow:     "// п\U0001F600z\n",
+			lastSeq:    0,
+			change:     insert(0, 3+len("п")+len("\U0001F600"), "q", 1),
+			wantRange:  Range{Start: Position{Line: 0, Character: 6}, End: Position{Line: 0, Character: 6}},
+			wantText:   "q",
+			wantShadow: "// п\U0001F600qz\n",
+		},
+		{
+			name:    "undo kind falls back",
+			shadow:  "ab\n",
+			lastSeq: 1,
+			change:  editor.Change{Kind: editor.ChangeKindUndo, Seq: 2},
+			wantErr: true,
+		},
+		{
+			name:    "redo kind falls back",
+			shadow:  "ab\n",
+			lastSeq: 1,
+			change:  editor.Change{Kind: editor.ChangeKindRedo, Seq: 2},
+			wantErr: true,
+		},
+		{
+			name:    "seq gap falls back",
+			shadow:  "ab\n",
+			lastSeq: 1,
+			change:  insert(0, 0, "x", 3),
+			wantErr: true,
+		},
+		{
+			name:    "duplicate seq falls back",
+			shadow:  "ab\n",
+			lastSeq: 2,
+			change:  insert(0, 0, "x", 2),
+			wantErr: true,
+		},
+		{
+			name:    "removed text mismatch falls back",
+			shadow:  "ab\ncd\n",
+			lastSeq: 1,
+			change:  del(0, 1, 1, 1, "zz", 2),
+			wantErr: true,
+		},
+		{
+			name:    "line out of bounds falls back",
+			shadow:  "ab\n",
+			lastSeq: 1,
+			change:  insert(5, 0, "x", 2),
+			wantErr: true,
+		},
+		{
+			name:    "column out of bounds falls back",
+			shadow:  "ab\n",
+			lastSeq: 1,
+			change:  insert(0, 7, "x", 2),
+			wantErr: true,
+		},
+		{
+			name:    "column splits multibyte rune falls back",
+			shadow:  "п\n",
+			lastSeq: 1,
+			change:  insert(0, 1, "x", 2),
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event, newShadow, err := incrementalChange(tc.shadow, tc.lastSeq, tc.change)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("incrementalChange = (%+v, %q), want error", event, newShadow)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("incrementalChange: %v", err)
+			}
+			if event.Range == nil || *event.Range != tc.wantRange {
+				t.Errorf("Range = %+v, want %+v", event.Range, tc.wantRange)
+			}
+			if event.Text != tc.wantText {
+				t.Errorf("Text = %q, want %q", event.Text, tc.wantText)
+			}
+			if newShadow != tc.wantShadow {
+				t.Errorf("shadow = %q, want %q", newShadow, tc.wantShadow)
+			}
+		})
+	}
+}
+
+func TestByteOffsetInText(t *testing.T) {
+	cases := []struct {
+		name    string
+		text    string
+		pos     editor.Position
+		want    int
+		wantErr bool
+	}{
+		{"start of text", "ab\ncd", editor.Position{Line: 0, Column: 0}, 0, false},
+		{"end of second line", "ab\ncd", editor.Position{Line: 1, Column: 2}, 5, false},
+		{"phantom line after trailing newline", "ab\n", editor.Position{Line: 1, Column: 0}, 3, false},
+		{"column at line end", "ab\ncd\n", editor.Position{Line: 0, Column: 2}, 2, false},
+		{"column past line end", "ab\n", editor.Position{Line: 0, Column: 3}, 0, true},
+		{"line past last line", "ab\n", editor.Position{Line: 2, Column: 0}, 0, true},
+		{"negative line", "ab", editor.Position{Line: -1, Column: 0}, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := byteOffsetInText(tc.text, tc.pos)
+			if tc.wantErr {
+				if !errors.Is(err, ErrPositionOutOfBounds) {
+					t.Fatalf("err = %v, want ErrPositionOutOfBounds", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("byteOffsetInText: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("offset = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 

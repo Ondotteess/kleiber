@@ -190,8 +190,19 @@ func (s *fakeServer) CloseAndWait() {
 // call Stop/Close manually unless it wants to observe the teardown.
 func connectedClient(t *testing.T) (*Client, *fakeServer) {
 	t.Helper()
+	return connectedClientWith(t, nil)
+}
+
+// connectedClientWith is connectedClient with a hook to reconfigure
+// the fakeServer (for example, override the initialize handler) before
+// the handshake runs. A nil configure keeps the default handlers.
+func connectedClientWith(t *testing.T, configure func(*fakeServer)) (*Client, *fakeServer) {
+	t.Helper()
 	clientNet, serverNet := net.Pipe()
 	server := newFakeServer(t, serverNet)
+	if configure != nil {
+		configure(server)
+	}
 	go server.Run()
 
 	client := NewClient(ClientOptions{Logger: testLogger(t)})
@@ -345,6 +356,96 @@ func TestClient_DidChange_SendsFullTextNotification(t *testing.T) {
 	}
 }
 
+func TestClient_DidChangeEvents_SendsEventsVerbatim(t *testing.T) {
+	client, server := connectedClient(t)
+	seen := make(chan *Notification, 1)
+	server.HandleNotification(MethodTextDocumentDidChange, func(n *Notification) {
+		seen <- n
+	})
+
+	ranged := Range{
+		Start: Position{Line: 1, Character: 2},
+		End:   Position{Line: 1, Character: 5},
+	}
+	err := client.DidChangeEvents(context.Background(), "file:///x.go", 7,
+		[]TextDocumentContentChangeEvent{
+			{Range: &ranged, Text: "abc"},
+			{Text: "full text"},
+		})
+	if err != nil {
+		t.Fatalf("DidChangeEvents: %v", err)
+	}
+
+	select {
+	case n := <-seen:
+		var p DidChangeTextDocumentParams
+		if err := json.Unmarshal(n.Params, &p); err != nil {
+			t.Fatalf("unmarshal params: %v", err)
+		}
+		if p.TextDocument.URI != "file:///x.go" {
+			t.Errorf("URI = %q, want file:///x.go", p.TextDocument.URI)
+		}
+		if p.TextDocument.Version != 7 {
+			t.Errorf("Version = %d, want 7", p.TextDocument.Version)
+		}
+		if len(p.ContentChanges) != 2 {
+			t.Fatalf("ContentChanges len = %d, want 2", len(p.ContentChanges))
+		}
+		if p.ContentChanges[0].Range == nil || *p.ContentChanges[0].Range != ranged {
+			t.Errorf("ContentChanges[0].Range = %+v, want %+v", p.ContentChanges[0].Range, ranged)
+		}
+		if p.ContentChanges[0].Text != "abc" {
+			t.Errorf("ContentChanges[0].Text = %q, want abc", p.ContentChanges[0].Text)
+		}
+		if p.ContentChanges[1].Range != nil {
+			t.Errorf("ContentChanges[1].Range = %+v, want nil", p.ContentChanges[1].Range)
+		}
+		if p.ContentChanges[1].Text != "full text" {
+			t.Errorf("ContentChanges[1].Text = %q, want full text", p.ContentChanges[1].Text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive didChange notification in 2s")
+	}
+}
+
+func TestClient_SyncMode_DefaultsToFullWhenServerOmitsCapability(t *testing.T) {
+	client, _ := connectedClient(t)
+	if got := client.SyncMode(); got != TextDocumentSyncFull {
+		t.Errorf("SyncMode = %v, want TextDocumentSyncFull", got)
+	}
+}
+
+func TestClient_SyncMode_RecordsNegotiatedKind(t *testing.T) {
+	cases := []struct {
+		name string
+		sync json.RawMessage
+		want TextDocumentSyncKind
+	}{
+		{"bare integer incremental", json.RawMessage(`2`), TextDocumentSyncIncremental},
+		{"options object incremental", json.RawMessage(`{"openClose":true,"change":2}`), TextDocumentSyncIncremental},
+		{"options object full", json.RawMessage(`{"openClose":true,"change":1}`), TextDocumentSyncFull},
+		{"explicit none", json.RawMessage(`0`), TextDocumentSyncNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := json.Marshal(InitializeResult{
+				Capabilities: ServerCapabilities{TextDocumentSync: tc.sync},
+			})
+			if err != nil {
+				t.Fatalf("marshal InitializeResult: %v", err)
+			}
+			client, _ := connectedClientWith(t, func(s *fakeServer) {
+				s.Handle(MethodInitialize, func(req *Request) *Response {
+					return &Response{ID: req.ID, Result: result}
+				})
+			})
+			if got := client.SyncMode(); got != tc.want {
+				t.Errorf("SyncMode = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClient_DidClose_SendsNotification(t *testing.T) {
 	client, server := connectedClient(t)
 	seen := make(chan *Notification, 1)
@@ -374,6 +475,9 @@ func TestClient_DocumentSync_BeforeStart_Errors(t *testing.T) {
 	c := NewClient(ClientOptions{Logger: testLogger(t)})
 	if err := c.DidChange(context.Background(), "file:///x.go", 2, ""); !errors.Is(err, ErrClientNotStarted) {
 		t.Errorf("DidChange err = %v, want ErrClientNotStarted", err)
+	}
+	if err := c.DidChangeEvents(context.Background(), "file:///x.go", 2, nil); !errors.Is(err, ErrClientNotStarted) {
+		t.Errorf("DidChangeEvents err = %v, want ErrClientNotStarted", err)
 	}
 	if err := c.DidClose(context.Background(), "file:///x.go"); !errors.Is(err, ErrClientNotStarted) {
 		t.Errorf("DidClose err = %v, want ErrClientNotStarted", err)

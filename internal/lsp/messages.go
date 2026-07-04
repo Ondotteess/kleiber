@@ -67,9 +67,9 @@ type TextDocumentItem struct {
 }
 
 // TextDocumentSyncKind enumerates how the client tells the server about
-// document changes. Kleiber currently negotiates Full (resend the entire
-// text on every change), since the editor engine that produces
-// incremental edits is not yet in place.
+// document changes. Kleiber sends ranged incremental changes when the
+// server negotiates TextDocumentSyncIncremental and resends the full
+// text otherwise.
 type TextDocumentSyncKind int
 
 // TextDocumentSyncKind constants.
@@ -386,10 +386,18 @@ type DidOpenTextDocumentParams struct {
 	TextDocument TextDocumentItem `json:"textDocument"`
 }
 
-// TextDocumentContentChangeEvent describes a full document snapshot for
-// textDocument/didChange. Range and RangeLength are intentionally omitted:
-// Kleiber currently uses TextDocumentSyncFull.
+// TextDocumentContentChangeEvent describes one document change for
+// textDocument/didChange. A nil Range means Text is a full-document
+// replacement (the TextDocumentSyncFull shape); a non-nil Range means
+// Text replaces exactly that UTF-16 range (TextDocumentSyncIncremental).
+// RangeLength is deprecated by the spec and intentionally omitted.
 type TextDocumentContentChangeEvent struct {
+	// Range is the UTF-16 half-open range the change replaces, or nil
+	// for a full-document replacement.
+	Range *Range `json:"range,omitempty"`
+
+	// Text is the replacement text: the whole document when Range is
+	// nil, otherwise the text spliced into Range.
 	Text string `json:"text"`
 }
 
