@@ -21,12 +21,14 @@ import (
 // caretWidthPx is the on-screen thickness of the caret bar in pixels.
 const caretWidthPx = 2
 
-// IDEEditor renders the active tab's buffer read-only: a line-number gutter,
-// syntax-highlighted text, the current-line highlight, selection overlays and
-// a caret. It owns the vertical scroll state and a per-buffer highlight cache
-// so highlighting is recomputed only when the buffer's sequence changes.
+// IDEEditor renders the active tab's buffer and edits it in place: a
+// line-number gutter, syntax-highlighted text, the current-line highlight,
+// selection overlays, find-match highlights and a caret. It owns the vertical
+// scroll state, the find-bar state, and a per-buffer highlight cache so
+// highlighting is recomputed only when the buffer's sequence changes.
 type IDEEditor struct {
 	list widget.List
+	find FindState
 
 	// Highlight cache. lastSpans holds one span slice per line for the
 	// buffer identified by lastBufferID at sequence lastSeq.
@@ -40,22 +42,30 @@ type IDEEditor struct {
 func NewIDEEditor() *IDEEditor {
 	return &IDEEditor{
 		list: widget.List{List: layout.List{Axis: layout.Vertical}},
+		find: NewFindState(),
 	}
 }
 
-// Layout draws the active tab of wb. When no tab is open it centers a muted
-// placeholder. The gutter scrolls with the text because each list item draws
-// its own gutter cell beside the line.
-func (e *IDEEditor) Layout(gtx layout.Context, th *IDETheme, wb *Workbench) layout.Dimensions {
+// Layout draws the active tab of wb and processes editor input for the frame.
+// When no tab is open it centers a muted placeholder. The gutter scrolls with
+// the text because each list item draws its own gutter cell beside the line.
+// It returns true when input mutated buffer or selection state (or the find
+// bar changed) so the caller can invalidate the window.
+func (e *IDEEditor) Layout(gtx layout.Context, th *IDETheme, wb *Workbench) (layout.Dimensions, bool) {
 	paint.FillShape(gtx.Ops, th.Background, clip.Rect{Max: gtx.Constraints.Max}.Op())
+
+	// Route pointer clicks and (when focused) keys to the editor. Registered
+	// over the whole editor body before the list draws.
+	e.registerInput(gtx, clip.Rect{Max: gtx.Constraints.Max})
+	changed := e.handleInput(gtx, wb)
 
 	tab, ok := wb.ActiveTab()
 	if !ok {
-		return e.layoutEmpty(gtx, th)
+		return e.layoutEmpty(gtx, th), changed
 	}
 	buf, err := wb.ActiveBuffer()
 	if err != nil || buf == nil {
-		return e.layoutEmpty(gtx, th)
+		return e.layoutEmpty(gtx, th), changed
 	}
 
 	view, _ := wb.ActiveView()
@@ -93,11 +103,20 @@ func (e *IDEEditor) Layout(gtx layout.Context, th *IDETheme, wb *Workbench) layo
 		haveCaret:   haveCaret,
 		selRange:    selRange,
 		haveSel:     haveSel,
+		findMatches: e.find.MatchesFor(buf),
 	}
 
-	return material.List(th.Theme, &e.list).Layout(gtx, buf.Lines(), func(gtx layout.Context, index int) layout.Dimensions {
+	dims := material.List(th.Theme, &e.list).Layout(gtx, buf.Lines(), func(gtx layout.Context, index int) layout.Dimensions {
 		return rd.line(gtx, index)
 	})
+
+	// The find bar overlays the top of the editor body when open.
+	if e.find.Open() {
+		if e.find.Layout(gtx, th, wb, e, view, buf) {
+			changed = true
+		}
+	}
+	return dims, changed
 }
 
 // layoutEmpty centers a muted placeholder when nothing is open.
@@ -156,6 +175,7 @@ type rowDraw struct {
 	haveCaret   bool
 	selRange    editor.Range
 	haveSel     bool
+	findMatches []editor.Range
 }
 
 // line draws a single editor row: current-line highlight, gutter number,
@@ -173,6 +193,9 @@ func (rd rowDraw) line(gtx layout.Context, index int) layout.Dimensions {
 
 	// Gutter background and right-aligned line number.
 	rd.drawGutter(gtx, index)
+
+	// Find-match highlights for this line (behind selection and text).
+	rd.drawFindMatches(gtx, index, lineText)
 
 	// Selection overlay for this line (behind text).
 	if rd.haveSel {
@@ -254,6 +277,45 @@ func (rd rowDraw) drawSelection(gtx layout.Context, index int, lineText string) 
 	stack := op.Offset(image.Pt(x0, 0)).Push(gtx.Ops)
 	paint.FillShape(gtx.Ops, rd.theme.Selection, clip.Rect{Max: image.Point{X: x1 - x0, Y: rd.lineHeight}}.Op())
 	stack.Pop()
+}
+
+// drawFindMatches draws the find-highlight rectangle for every match that
+// intersects this line. Each match is clipped to the line the same way a
+// selection is, so a match spanning a newline highlights on each line it
+// touches.
+func (rd rowDraw) drawFindMatches(gtx layout.Context, index int, lineText string) {
+	for _, m := range rd.findMatches {
+		if index < m.Start.Line || index > m.End.Line {
+			continue
+		}
+		startCol := 0
+		if index == m.Start.Line {
+			startCol = m.Start.Column
+		}
+		endByte := len(lineText)
+		extendEOL := index < m.End.Line
+		if index == m.End.Line {
+			endByte = m.End.Column
+		}
+
+		startVis := VisualColumn(lineText, startCol, rd.tabWidth)
+		endVis := VisualColumn(lineText, endByte, rd.tabWidth)
+		x0 := rd.gutterWidth + startVis*rd.cell
+		x1 := rd.gutterWidth + endVis*rd.cell
+		if extendEOL {
+			x1 += rd.cell
+		}
+		if x1 <= x0 {
+			if !extendEOL {
+				continue
+			}
+			x1 = x0 + rd.cell
+		}
+
+		stack := op.Offset(image.Pt(x0, 0)).Push(gtx.Ops)
+		paint.FillShape(gtx.Ops, rd.theme.FindHighlight, clip.Rect{Max: image.Point{X: x1 - x0, Y: rd.lineHeight}}.Op())
+		stack.Pop()
+	}
 }
 
 // drawSegments draws each colored segment of the line at its absolute X,

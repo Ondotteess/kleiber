@@ -90,7 +90,7 @@ func RunIDEWindow(ctx context.Context, wb *Workbench, opts IDEWindowOptions) err
 			return nil
 		case gioapp.FrameEvent:
 			gtx := gioapp.NewContext(&ops, event)
-			handleIDEKeys(gtx, wb, w)
+			view.handleIDEKeys(gtx, wb, w)
 			if view.layout(gtx, wb) {
 				w.Invalidate()
 			}
@@ -99,13 +99,15 @@ func RunIDEWindow(ctx context.Context, wb *Workbench, opts IDEWindowOptions) err
 	}
 }
 
-// handleIDEKeys processes the minimal key bindings for the read-only
-// skeleton: Ctrl+W closes the active tab. Richer input lands in a later task.
-func handleIDEKeys(gtx layout.Context, wb *Workbench, w *gioapp.Window) {
+// handleIDEKeys processes the window-level key bindings that are independent
+// of editor focus: Ctrl+W closes the active tab and Ctrl+F opens the find bar
+// (focusing its query field). Per-editor movement and text editing are handled
+// inside IDEEditor while it holds focus.
+func (v *ideWindow) handleIDEKeys(gtx layout.Context, wb *Workbench, w *gioapp.Window) {
 	for {
 		ev, ok := gtx.Event(
-			key.Filter{Name: key.Name("W"), Required: key.ModCtrl},
-			key.Filter{Name: key.Name("W"), Required: key.ModCommand},
+			key.Filter{Name: key.Name("W"), Required: key.ModShortcut},
+			key.Filter{Name: key.Name("F"), Required: key.ModShortcut},
 		)
 		if !ok {
 			return
@@ -114,9 +116,17 @@ func handleIDEKeys(gtx layout.Context, wb *Workbench, w *gioapp.Window) {
 		if !ok || ke.State != key.Press {
 			continue
 		}
-		if idx := wb.ActiveIndex(); idx >= 0 {
-			_ = wb.CloseTab(idx)
-			w.Invalidate()
+		switch ke.Name {
+		case key.Name("W"):
+			if idx := wb.ActiveIndex(); idx >= 0 {
+				_ = wb.CloseTab(idx)
+				w.Invalidate()
+			}
+		case key.Name("F"):
+			if _, hasTab := wb.ActiveTab(); hasTab {
+				v.editor.OpenFind(gtx)
+				w.Invalidate()
+			}
 		}
 	}
 }
@@ -152,7 +162,11 @@ func (v *ideWindow) layout(gtx layout.Context, wb *Workbench) bool {
 					return dims
 				}),
 				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-					return v.editor.Layout(gtx, v.theme, wb)
+					dims, ch := v.editor.Layout(gtx, v.theme, wb)
+					if ch {
+						changed = true
+					}
+					return dims
 				}),
 			)
 		}),

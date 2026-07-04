@@ -49,6 +49,10 @@ type IDETheme struct {
 	LineHighlight color.NRGBA
 	// Selection is the translucent fill behind selected text.
 	Selection color.NRGBA
+	// FindHighlight is the translucent fill drawn behind every find-bar
+	// match while the find bar is open. It is deliberately distinct from
+	// Selection so an active selection remains legible over a match.
+	FindHighlight color.NRGBA
 	// Caret is the color of the caret bar.
 	Caret color.NRGBA
 	// Foreground is the default text color.
@@ -94,6 +98,7 @@ func NewIDETheme() *IDETheme {
 		GutterText:      rgb(0x858585),
 		LineHighlight:   rgba(0xffffff, 0x14),
 		Selection:       rgba(0x264f78, 0x99),
+		FindHighlight:   rgba(0xea5c00, 0x66),
 		Caret:           rgb(0xaeafad),
 		Foreground:      rgb(0xd4d4d4),
 		Muted:           rgb(0x858585),
