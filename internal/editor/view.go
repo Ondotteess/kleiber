@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 // ErrViewBufferNil is returned by NewView when the supplied *Buffer is nil.
@@ -161,22 +162,28 @@ func (v *View) MoveCursorTo(p Position) error {
 	})
 }
 
-// MoveBy advances the cursor by deltaLine lines and deltaColumn bytes
+// MoveBy advances the cursor by deltaLine lines and deltaColumn runes
 // from its current position, collapsing the selection. The destination
 // is clamped to the buffer; movement that would land out of bounds
 // stops at the nearest valid position.
 //
-// MoveBy advances by raw byte columns within a line. Line-wrapped
-// movement (visual rows, multi-byte characters, tab expansion) is the
-// responsibility of higher layers — the editor engine operates on
-// byte positions, not glyphs.
+// Horizontal steps are measured in runes, not bytes, so a single step
+// crosses an entire multi-byte UTF-8 character. Vertical steps keep
+// the cursor's byte column but snap it left to the nearest rune start
+// on the target line, so the cursor never lands inside a character.
+// Higher-level notions (visual rows, tab expansion, grapheme
+// clusters) remain the responsibility of higher layers.
 func (v *View) MoveBy(deltaLine, deltaColumn int) error {
 	v.mu.Lock()
 	cursor := v.selection.Cursor
 	v.mu.Unlock()
-	target := Position{
+	target := clampPosition(v.buf, Position{
 		Line:   cursor.Line + deltaLine,
-		Column: cursor.Column + deltaColumn,
+		Column: cursor.Column,
+	})
+	target = snapToRuneStart(v.buf, target)
+	if deltaColumn != 0 {
+		target = stepRunes(v.buf, target, deltaColumn)
 	}
 	return v.MoveTo(target)
 }
@@ -260,9 +267,10 @@ func (v *View) Delete() (Edit, error) {
 }
 
 // Backspace deletes the current selection if it is non-empty; if the
-// selection is an empty caret, it deletes the single byte immediately
-// before the caret. At the start of the document Backspace is a
-// successful no-op.
+// selection is an empty caret, it deletes the single rune immediately
+// before the caret (at column 0 this joins the line with the previous
+// one by removing the newline). At the start of the document Backspace
+// is a successful no-op.
 func (v *View) Backspace() (Edit, error) {
 	v.mu.Lock()
 	sel := v.selection
@@ -288,6 +296,20 @@ func (v *View) Backspace() (Edit, error) {
 		return edit, setErr
 	}
 	return edit, nil
+}
+
+// SelectedText returns the text covered by the View's current
+// selection, independent of its direction. A caret (empty selection)
+// yields "".
+func (v *View) SelectedText() string {
+	v.mu.Lock()
+	sel := v.selection
+	v.mu.Unlock()
+	r := sel.AsRange()
+	if r.Empty() {
+		return ""
+	}
+	return v.buf.textIn(r)
 }
 
 // MoveToDocumentStart collapses the selection to a caret at (0, 0).
@@ -510,14 +532,22 @@ func clampPosition(b *Buffer, p Position) Position {
 	return Position{Line: line, Column: col}
 }
 
-// positionBefore returns the position one byte before p, or (zero,
+// positionBefore returns the position one rune before p, or (zero,
 // false) if p is at (0, 0). At column 0 of a non-first line, it
-// returns the end of the previous line.
+// returns the end of the previous line. If p sits outside its line or
+// on invalid UTF-8, it falls back to stepping a single byte so the
+// caller still makes progress.
 func positionBefore(b *Buffer, p Position) (Position, bool) {
 	if p.Line == 0 && p.Column == 0 {
 		return Position{}, false
 	}
 	if p.Column > 0 {
+		text, ok := b.LineText(p.Line)
+		if ok && p.Column <= len(text) {
+			if _, size := utf8.DecodeLastRuneInString(text[:p.Column]); size > 0 {
+				return Position{Line: p.Line, Column: p.Column - size}, true
+			}
+		}
 		return Position{Line: p.Line, Column: p.Column - 1}, true
 	}
 	prev := p.Line - 1
@@ -526,6 +556,50 @@ func positionBefore(b *Buffer, p Position) (Position, bool) {
 		return Position{}, false
 	}
 	return Position{Line: prev, Column: len(text)}, true
+}
+
+// snapToRuneStart returns p with its column moved left to the nearest
+// UTF-8 rune boundary on its line. Columns at or past the line's end
+// are returned unchanged (the end of a line is always a boundary).
+func snapToRuneStart(b *Buffer, p Position) Position {
+	text, ok := b.LineText(p.Line)
+	if !ok {
+		return p
+	}
+	col := p.Column
+	if col <= 0 || col >= len(text) {
+		return p
+	}
+	for col > 0 && !utf8.RuneStart(text[col]) {
+		col--
+	}
+	return Position{Line: p.Line, Column: col}
+}
+
+// stepRunes moves p by delta runes within its line (right for
+// positive delta, left for negative), stopping at the line's start or
+// end. p's column should already sit on a rune boundary; invalid
+// UTF-8 degrades to single-byte steps.
+func stepRunes(b *Buffer, p Position, delta int) Position {
+	text, ok := b.LineText(p.Line)
+	if !ok {
+		return p
+	}
+	col := p.Column
+	if col > len(text) {
+		col = len(text)
+	}
+	for delta > 0 && col < len(text) {
+		_, size := utf8.DecodeRuneInString(text[col:])
+		col += size
+		delta--
+	}
+	for delta < 0 && col > 0 {
+		_, size := utf8.DecodeLastRuneInString(text[:col])
+		col -= size
+		delta++
+	}
+	return Position{Line: p.Line, Column: col}
 }
 
 // endOfBuffer returns the position immediately after the last byte

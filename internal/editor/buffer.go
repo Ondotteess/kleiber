@@ -152,6 +152,25 @@ func (b *Buffer) LineText(line int) (string, bool) {
 	return string(b.data[start:end]), true
 }
 
+// textIn returns the text covered by r (normalized) as a single
+// consistent snapshot. Out-of-bounds endpoints yield "" — callers
+// such as View.SelectedText always pass clamped positions, so the
+// empty string only surfaces when the buffer mutated concurrently.
+func (b *Buffer) textIn(r Range) string {
+	r = r.Normalized()
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	startOff, err := b.byteOffsetLocked(r.Start)
+	if err != nil {
+		return ""
+	}
+	endOff, err := b.byteOffsetLocked(r.End)
+	if err != nil {
+		return ""
+	}
+	return string(b.data[startOff:endOff])
+}
+
 // Seq returns a monotonic counter that increases by one on every
 // successful mutation (Insert, Delete, Undo, Redo). Subscribers
 // can use it to detect "has the buffer changed since checkpoint X?"

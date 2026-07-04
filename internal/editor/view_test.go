@@ -83,6 +83,66 @@ func TestView_MoveBy_AdvancesAndClamps(t *testing.T) {
 	}
 }
 
+func TestView_MoveBy_HorizontalStepsAreRunes(t *testing.T) {
+	// Cyrillic letters are two bytes each in UTF-8; one horizontal
+	// step must cross a whole letter, never half of one.
+	cases := []struct {
+		name        string
+		text        string
+		start       Position
+		deltaColumn int
+		want        Position
+	}{
+		{"ascii right", "abc", Position{0, 0}, 1, Position{0, 1}},
+		{"cyrillic right one rune", "привет", Position{0, 0}, 1, Position{0, 2}},
+		{"cyrillic right two runes", "привет", Position{0, 0}, 2, Position{0, 4}},
+		{"cyrillic left one rune", "привет", Position{0, 4}, -1, Position{0, 2}},
+		{"mixed ascii and cyrillic", "aпb", Position{0, 1}, 1, Position{0, 3}},
+		{"clamps at line end", "пп", Position{0, 2}, 5, Position{0, 4}},
+		{"clamps at line start", "пп", Position{0, 2}, -5, Position{0, 0}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _ := NewView(NewBuffer(tc.text))
+			if err := v.MoveTo(tc.start); err != nil {
+				t.Fatalf("MoveTo: %v", err)
+			}
+			if err := v.MoveBy(0, tc.deltaColumn); err != nil {
+				t.Fatalf("MoveBy: %v", err)
+			}
+			if got := v.Selection().Cursor; !got.Equal(tc.want) {
+				t.Errorf("Cursor = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestView_MoveBy_VerticalSnapsToRuneStart(t *testing.T) {
+	// Line 1 is "ппп": rune boundaries at byte columns 0, 2, 4, 6.
+	cases := []struct {
+		name  string
+		start Position
+		want  Position
+	}{
+		{"mid-rune column snaps left", Position{0, 3}, Position{1, 2}},
+		{"boundary column is kept", Position{0, 4}, Position{1, 4}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _ := NewView(NewBuffer("aaaa\nппп"))
+			if err := v.MoveTo(tc.start); err != nil {
+				t.Fatalf("MoveTo: %v", err)
+			}
+			if err := v.MoveBy(1, 0); err != nil {
+				t.Fatalf("MoveBy: %v", err)
+			}
+			if got := v.Selection().Cursor; !got.Equal(tc.want) {
+				t.Errorf("Cursor = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestView_Collapse_PutsCursorAtEnd(t *testing.T) {
 	v, _ := NewView(NewBuffer("hello"))
 	if err := v.SetSelection(NewSelection(Position{0, 1}, Position{0, 4})); err != nil {
@@ -249,20 +309,56 @@ func TestView_Delete_RemovesSelection(t *testing.T) {
 	}
 }
 
-func TestView_Backspace_DeletesByteBeforeCaret(t *testing.T) {
-	b := NewBuffer("hello")
-	v, _ := NewView(b)
-	if err := v.MoveTo(Position{0, 3}); err != nil {
-		t.Fatalf("MoveTo: %v", err)
+func TestView_Backspace_DeletesRuneBeforeCaret(t *testing.T) {
+	cases := []struct {
+		name       string
+		text       string
+		caret      Position
+		wantText   string
+		wantCursor Position
+	}{
+		{"ascii", "hello", Position{0, 3}, "helo", Position{0, 2}},
+		{"cyrillic mid-line", "привет", Position{0, 4}, "пивет", Position{0, 2}},
+		{"cyrillic at line end", "пп", Position{0, 4}, "п", Position{0, 2}},
 	}
-	if _, err := v.Backspace(); err != nil {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := NewBuffer(tc.text)
+			v, _ := NewView(b)
+			if err := v.MoveTo(tc.caret); err != nil {
+				t.Fatalf("MoveTo: %v", err)
+			}
+			if _, err := v.Backspace(); err != nil {
+				t.Fatalf("Backspace: %v", err)
+			}
+			if b.Text() != tc.wantText {
+				t.Errorf("buffer = %q, want %q", b.Text(), tc.wantText)
+			}
+			if got := v.Selection().Cursor; !got.Equal(tc.wantCursor) {
+				t.Errorf("Cursor = %v, want %v", got, tc.wantCursor)
+			}
+		})
+	}
+}
+
+func TestView_Backspace_NonEmptySelection_DeletesSelection(t *testing.T) {
+	b := NewBuffer("hello world")
+	v, _ := NewView(b)
+	if err := v.SetSelection(NewSelection(Position{0, 5}, Position{0, 0})); err != nil {
+		t.Fatalf("SetSelection: %v", err)
+	}
+	edit, err := v.Backspace()
+	if err != nil {
 		t.Fatalf("Backspace: %v", err)
 	}
-	if b.Text() != "helo" {
-		t.Errorf("buffer = %q, want %q", b.Text(), "helo")
+	if edit.Removed != "hello" {
+		t.Errorf("Removed = %q, want %q", edit.Removed, "hello")
 	}
-	if got := v.Selection().Cursor; !got.Equal(Position{0, 2}) {
-		t.Errorf("Cursor = %v, want 0:2", got)
+	if b.Text() != " world" {
+		t.Errorf("buffer = %q, want %q", b.Text(), " world")
+	}
+	if got := v.Selection().Cursor; !got.Equal(Position{0, 0}) {
+		t.Errorf("Cursor = %v, want 0:0", got)
 	}
 }
 
@@ -295,6 +391,34 @@ func TestView_Backspace_AtDocumentStart_IsNoop(t *testing.T) {
 	}
 	if b.Text() != "hello" {
 		t.Errorf("buffer = %q, want unchanged", b.Text())
+	}
+}
+
+// --- SelectedText ----------------------------------------------------
+
+func TestView_SelectedText_Cases(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		sel  Selection
+		want string
+	}{
+		{"caret is empty", "hello", NewCaret(Position{0, 2}), ""},
+		{"single line", "hello world", NewSelection(Position{0, 0}, Position{0, 5}), "hello"},
+		{"reversed selection", "hello world", NewSelection(Position{0, 5}, Position{0, 0}), "hello"},
+		{"multi-line", "hello\nworld", NewSelection(Position{0, 3}, Position{1, 2}), "lo\nwo"},
+		{"cyrillic", "привет", NewSelection(Position{0, 2}, Position{0, 6}), "ри"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _ := NewView(NewBuffer(tc.text))
+			if err := v.SetSelection(tc.sel); err != nil {
+				t.Fatalf("SetSelection: %v", err)
+			}
+			if got := v.SelectedText(); got != tc.want {
+				t.Errorf("SelectedText() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
