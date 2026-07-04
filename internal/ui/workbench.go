@@ -6,11 +6,16 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Ondotteess/kleiber/internal/app"
 	"github.com/Ondotteess/kleiber/internal/editor"
 	"github.com/Ondotteess/kleiber/internal/project"
 )
+
+// workbenchShutdownTimeout bounds how long Close waits for the language
+// server to stop before the process exits.
+const workbenchShutdownTimeout = 5 * time.Second
 
 // ErrNoActiveTab is returned by helpers that need an open editor when none
 // is active.
@@ -45,6 +50,7 @@ type Workbench struct {
 	tree     project.TreeNode
 	treeOK   bool
 	expanded map[string]bool // tree dir RelPath -> expanded
+	lsp      *LSPController
 }
 
 // NewWorkbench constructs a Workbench over a session. It performs no I/O;
@@ -90,6 +96,40 @@ func (w *Workbench) Session() *app.Session { return w.session }
 
 // Engine returns the underlying editor engine.
 func (w *Workbench) Engine() *editor.EditorEngine { return w.engine }
+
+// SetLSP attaches the language-server controller the UI queries for
+// diagnostics, completion, hover, and definition. It may be left unset
+// (nil), in which case LSP features are simply unavailable.
+func (w *Workbench) SetLSP(c *LSPController) {
+	w.mu.Lock()
+	w.lsp = c
+	w.mu.Unlock()
+}
+
+// LSP returns the attached language-server controller, or nil when none
+// is set. Callers must tolerate nil.
+func (w *Workbench) LSP() *LSPController {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lsp
+}
+
+// Close shuts the workbench's language server down and releases the
+// diagnostics subscription. It must be called before the process exits
+// (the Gio launcher exits via os.Exit, which skips deferred cleanup), so
+// gopls is not orphaned. Close is safe to call when no LSP is attached.
+func (w *Workbench) Close() {
+	c := w.LSP()
+	if c == nil {
+		return
+	}
+	if sup := c.Supervisor(); sup != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), workbenchShutdownTimeout)
+		_ = sup.Stop(ctx)
+		cancel()
+	}
+	c.Close()
+}
 
 // OpenFile opens path in a new tab, or activates the existing tab if the
 // file is already open. The file is read into an editor buffer with a

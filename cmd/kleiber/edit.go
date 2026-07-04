@@ -9,10 +9,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	appcore "github.com/Ondotteess/kleiber/internal/app"
 	"github.com/Ondotteess/kleiber/internal/config"
+	"github.com/Ondotteess/kleiber/internal/editor"
 	"github.com/Ondotteess/kleiber/internal/logging"
+	"github.com/Ondotteess/kleiber/internal/lsp"
 	"github.com/Ondotteess/kleiber/internal/ui"
 )
 
@@ -124,30 +127,56 @@ func setupEditLogging(debug bool, logFile string, stderr io.Writer) (*slog.Logge
 	return logger, func() {}, nil
 }
 
-// buildEditWorkbench constructs the session and workbench, loads the file
-// tree, and opens the initial file if one was given. Project analysis
-// failures (e.g. code that does not compile) are non-fatal: the IDE opens
-// anyway so the user can fix the code.
+// buildEditWorkbench constructs the editor engine, gopls supervisor,
+// session, and workbench, loads the file tree, and opens the initial file
+// if one was given. Project analysis failures (e.g. code that does not
+// compile) are non-fatal: the IDE opens anyway so the user can fix the
+// code, and gopls itself reports the errors as diagnostics.
 func buildEditWorkbench(ctx context.Context, root, openPath string, logger *slog.Logger) (*ui.Workbench, error) {
+	// The engine is created up front so the supervisor and the session
+	// share one instance: gopls mirrors this engine's buffers, and the
+	// supervisor doubles as the session's format-on-save provider.
+	engine := editor.NewEngine(editor.EngineOptions{Logger: logger})
+
+	supervisor, err := lsp.NewSupervisor(lsp.SupervisorOptions{
+		Engine: engine,
+		Logger: logger,
+		Client: lsp.ClientOptions{
+			WorkspaceFolders: workspaceFoldersFor(root, logger),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	supervisor.Start()
+
 	session, err := appcore.NewDefaultSession(ctx, appcore.DefaultSessionOptions{
 		ProjectRoot: root,
 		Logger:      logger,
+		Editor:      engine,
+		Formatter:   supervisor,
 	})
 	if err != nil {
-		// Project analysis failed (commonly: the code does not build).
-		// Open the workspace without it so the tree and editor still work.
 		logger.Warn("opening project analysis failed; continuing without it", "root", root, "err", err)
-		session, err = appcore.NewDefaultSession(ctx, appcore.DefaultSessionOptions{Logger: logger})
+		session, err = appcore.NewDefaultSession(ctx, appcore.DefaultSessionOptions{
+			Logger:    logger,
+			Editor:    engine,
+			Formatter: supervisor,
+		})
 		if err != nil {
+			stopSupervisor(supervisor)
 			return nil, err
 		}
 	}
 
 	wb, err := ui.NewWorkbench(session)
 	if err != nil {
+		stopSupervisor(supervisor)
 		return nil, err
 	}
 	wb.SetRoot(root)
+	wb.SetLSP(ui.NewLSPController(supervisor, engine))
+
 	if err := wb.RefreshTree(ctx); err != nil {
 		logger.Warn("loading file tree failed", "root", root, "err", err)
 	}
@@ -157,4 +186,23 @@ func buildEditWorkbench(ctx context.Context, root, openPath string, logger *slog
 		}
 	}
 	return wb, nil
+}
+
+// workspaceFoldersFor builds the gopls workspace-folder list from the
+// workspace root. gopls discovers the modules beneath it.
+func workspaceFoldersFor(root string, logger *slog.Logger) []lsp.WorkspaceFolder {
+	uri, err := lsp.DocumentURIFromPath(root)
+	if err != nil {
+		logger.Warn("building workspace folder URI failed", "root", root, "err", err)
+		return nil
+	}
+	return []lsp.WorkspaceFolder{{URI: uri, Name: filepath.Base(root)}}
+}
+
+// stopSupervisor stops a supervisor on an error path so a partially built
+// workbench does not orphan gopls.
+func stopSupervisor(s *lsp.Supervisor) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.Stop(ctx)
 }

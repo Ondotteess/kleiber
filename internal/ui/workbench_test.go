@@ -218,3 +218,26 @@ func containsString(ss []string, want string) bool {
 	}
 	return false
 }
+
+func TestWorkbench_LSP_SetAndGet(t *testing.T) {
+	wb := newWorkbench(t)
+	if wb.LSP() != nil {
+		t.Error("LSP should be nil before SetLSP")
+	}
+	c := NewLSPController(nil, wb.Engine())
+	wb.SetLSP(c)
+	if wb.LSP() != c {
+		t.Error("LSP did not return the controller set by SetLSP")
+	}
+}
+
+func TestWorkbench_Close_NilLSP_NoPanic(t *testing.T) {
+	wb := newWorkbench(t)
+	wb.Close() // no LSP attached; must be a safe no-op
+}
+
+func TestWorkbench_Close_ClosesController(t *testing.T) {
+	wb := newWorkbench(t)
+	wb.SetLSP(NewLSPController(nil, wb.Engine()))
+	wb.Close() // closes the controller (nil supervisor) without hanging
+}

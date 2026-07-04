@@ -42,6 +42,9 @@ func launchIDEGioWindow(ctx context.Context, wb *ui.Workbench, opts ui.IDEWindow
 	windowResult := make(chan error, 1)
 	go func() {
 		err := runIDEWindowSafely(ctx, wb, opts)
+		// gioProcessExit skips deferred cleanup, so stop the language
+		// server here to avoid orphaning gopls after the window closes.
+		wb.Close()
 		windowResult <- err
 		if err != nil {
 			fmt.Fprintln(stderr, "kleiber edit:", err)
