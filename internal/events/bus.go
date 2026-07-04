@@ -28,6 +28,17 @@ type Topic[T any] struct {
 type subscription[T any] struct {
 	ch   chan T
 	done chan struct{}
+
+	// closeOnce guards done so that a subscriber's cancel and the
+	// topic's Close (which race to signal the same subscription) close
+	// it exactly once instead of panicking on a double close.
+	closeOnce sync.Once
+}
+
+// closeDone closes the subscription's done channel exactly once,
+// regardless of whether cancel or Topic.Close gets there first.
+func (s *subscription[T]) closeDone() {
+	s.closeOnce.Do(func() { close(s.done) })
 }
 
 // NewTopic creates a Topic identified by name. The name appears in log
@@ -63,7 +74,7 @@ func (t *Topic[T]) Subscribe(buffer int) (<-chan T, func()) {
 	t.subs = append(t.subs, sub)
 	t.mu.Unlock()
 
-	cancel := sync.OnceFunc(func() {
+	cancel := func() {
 		t.mu.Lock()
 		for i, s := range t.subs {
 			if s == sub {
@@ -72,8 +83,8 @@ func (t *Topic[T]) Subscribe(buffer int) (<-chan T, func()) {
 			}
 		}
 		t.mu.Unlock()
-		close(sub.done)
-	})
+		sub.closeDone()
+	}
 	return sub.ch, cancel
 }
 
@@ -124,11 +135,7 @@ func (t *Topic[T]) Close() {
 
 	close(t.done)
 	for _, sub := range subs {
-		select {
-		case <-sub.done:
-		default:
-			close(sub.done)
-		}
+		sub.closeDone()
 	}
 	t.logger.Debug("topic closed", "topic", t.name)
 }
