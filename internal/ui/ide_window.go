@@ -86,6 +86,9 @@ func RunIDEWindow(ctx context.Context, wb *Workbench, opts IDEWindowOptions) err
 	)
 
 	view := newIDEWindow()
+	// Let async LSP result handlers schedule redraws once results are stored.
+	// Window.Invalidate is goroutine-safe in Gio.
+	view.editor.SetInvalidate(w.Invalidate)
 	var ops op.Ops
 
 	for {

@@ -5,6 +5,7 @@ package ui
 import (
 	"image"
 	"strings"
+	"sync"
 
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -40,14 +41,50 @@ type IDEEditor struct {
 	lastSeq      int
 	lastLang     syntax.Language
 	lastSpans    [][]syntax.Span
+
+	// invalidate schedules a window redraw from any goroutine. It is set
+	// once via SetInvalidate after the window is created and is safe to call
+	// concurrently (Gio's Window.Invalidate is goroutine-safe). Async LSP
+	// result handlers call it after storing their results so the popup
+	// appears on the next frame. It may be nil before SetInvalidate runs.
+	invalidate func()
+
+	// lspMu guards the async LSP UI state below, which background request
+	// goroutines write and the render loop reads. It is held only briefly to
+	// copy what a frame needs.
+	lspMu      sync.Mutex
+	completion completionState
+	hover      hoverState
+
+	// revealLine, when >= 0, is a scroll target set by an async
+	// go-to-definition handler and applied to list on the next Layout. It is
+	// funneled through lspMu (rather than written directly to list.Position
+	// off-goroutine) so the widget.List is only ever mutated on the UI
+	// goroutine, avoiding a data race with the render loop.
+	revealLine int
+
+	// completionList is the scroll state for the completion popup's rows. It
+	// is touched only on the UI goroutine (during Layout), so it needs no
+	// lock.
+	completionList widget.List
 }
 
 // NewIDEEditor constructs an editor widget with a vertical scroll list.
 func NewIDEEditor() *IDEEditor {
 	return &IDEEditor{
-		list: widget.List{List: layout.List{Axis: layout.Vertical}},
-		find: NewFindState(),
+		list:           widget.List{List: layout.List{Axis: layout.Vertical}},
+		find:           NewFindState(),
+		completionList: widget.List{List: layout.List{Axis: layout.Vertical}},
+		revealLine:     -1,
 	}
+}
+
+// SetInvalidate stores the window's redraw hook so async LSP result handlers
+// can schedule a frame after they store results. It is called once, after the
+// window is created; fn must be safe to call from any goroutine (Gio's
+// Window.Invalidate is).
+func (e *IDEEditor) SetInvalidate(fn func()) {
+	e.invalidate = fn
 }
 
 // Layout draws the active tab of wb and processes editor input for the frame.
@@ -57,6 +94,11 @@ func NewIDEEditor() *IDEEditor {
 // bar changed) so the caller can invalidate the window.
 func (e *IDEEditor) Layout(gtx layout.Context, th *IDETheme, wb *Workbench) (layout.Dimensions, bool) {
 	paint.FillShape(gtx.Ops, th.Background, clip.Rect{Max: gtx.Constraints.Max}.Op())
+
+	// Apply any scroll target queued by an async go-to-definition handler.
+	// Mutating list here (on the UI goroutine) keeps the widget.List free of
+	// cross-goroutine writes.
+	e.applyPendingReveal()
 
 	// Route pointer clicks and (when focused) keys to the editor. Registered
 	// over the whole editor body before the list draws.
@@ -129,6 +171,11 @@ func (e *IDEEditor) Layout(gtx layout.Context, th *IDETheme, wb *Workbench) (lay
 			changed = true
 		}
 	}
+
+	// LSP popups (completion list, hover tooltip) float over the text,
+	// anchored near the caret. They are drawn last so they sit above every
+	// other editor layer.
+	e.layoutLSPPopups(gtx, th, buf, cursorLine, cursorCol, cell, lineHeight, gutterWidth, tabWidth)
 	return dims, changed
 }
 

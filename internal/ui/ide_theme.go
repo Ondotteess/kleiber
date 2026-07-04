@@ -79,6 +79,16 @@ type IDETheme struct {
 	// the fallback for unknown severities.
 	DiagnosticInfo color.NRGBA
 
+	// PopupBg fills the background of floating LSP popups (completion list,
+	// hover tooltip).
+	PopupBg color.NRGBA
+	// PopupBorder colors the 1px border framing an LSP popup.
+	PopupBorder color.NRGBA
+	// PopupText is the default text color inside an LSP popup.
+	PopupText color.NRGBA
+	// PopupSelected fills the highlighted row of the completion popup.
+	PopupSelected color.NRGBA
+
 	// cellWidthCache caches the measured cell width keyed by the metric and
 	// text size it was measured at, so the off-screen sample is laid out at
 	// most once per unique rendering context.
@@ -123,6 +133,10 @@ func NewIDETheme() *IDETheme {
 		DiagnosticError:   rgb(0xf14c4c),
 		DiagnosticWarning: rgb(0xcca700),
 		DiagnosticInfo:    rgb(0x3794ff),
+		PopupBg:           rgb(0x252526),
+		PopupBorder:       rgb(0x454545),
+		PopupText:         rgb(0xd4d4d4),
+		PopupSelected:     rgb(0x094771),
 		cellWidthCache:    map[cellMetricKey]int{},
 		lineHeightCache:   map[cellMetricKey]int{},
 	}

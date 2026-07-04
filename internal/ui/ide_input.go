@@ -68,6 +68,12 @@ func (e *IDEEditor) handleInput(gtx layout.Context, wb *Workbench) bool {
 			}
 		case key.EditEvent:
 			// Typed text (including multi-byte input) replaces the selection.
+			// Plain printable keys arrive here (not as key.Event), so this is
+			// where typing dismisses an open LSP popup: the stale suggestions
+			// no longer match once the buffer changes.
+			if e.dismissLSPPopupsOnEdit() {
+				changed = true
+			}
 			if view, err := wb.ActiveView(); err == nil && view != nil {
 				if _, err := view.InsertText(ev.Text); err == nil {
 					changed = true
@@ -80,6 +86,18 @@ func (e *IDEEditor) handleInput(gtx layout.Context, wb *Workbench) bool {
 			}
 		case key.Event:
 			if ev.State != key.Press {
+				continue
+			}
+			// LSP popups get first refusal on each key so their navigation
+			// keys (arrows, Enter/Tab, Esc) act on the popup instead of the
+			// buffer. A consumed key is fully handled here; an unconsumed key
+			// may still have closed a popup (e.g. typing while it is open)
+			// before falling through to normal editing.
+			consumed, ch := e.handleLSPKey(gtx, wb, ev)
+			if ch {
+				changed = true
+			}
+			if consumed {
 				continue
 			}
 			if e.applyKey(gtx, wb, ev) {
@@ -120,6 +138,14 @@ func (e *IDEEditor) inputFilters() []event.Filter {
 		key.Filter{Focus: tag, Name: "Z", Required: key.ModShortcut, Optional: key.ModShift},
 		key.Filter{Focus: tag, Name: "Y", Required: key.ModShortcut},
 		key.Filter{Focus: tag, Name: "S", Required: key.ModShortcut},
+
+		// LSP feature triggers, gated on editor focus by the tag: Ctrl+Space
+		// completion, F1 hover, F12 go-to-definition. Escape closes any open
+		// popup (and is otherwise unused by the editor).
+		key.Filter{Focus: tag, Name: key.NameSpace, Required: key.ModShortcut},
+		key.Filter{Focus: tag, Name: key.NameF1},
+		key.Filter{Focus: tag, Name: key.NameF12},
+		key.Filter{Focus: tag, Name: key.NameEscape},
 	}
 }
 
