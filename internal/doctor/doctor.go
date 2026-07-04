@@ -62,10 +62,13 @@ func (d *Doctor) Run(ctx context.Context, root string) ([]Finding, error) {
 }
 
 // DefaultChecks returns the built-in checks in canonical order:
-// toolchain, tools, workspace. Callers that want a different subset
-// can pass selected Checks to New directly.
+// go-binary, toolchain, tools, workspace. The go-binary check runs first
+// because everything downstream depends on the go command existing.
+// Callers that want a different subset can pass selected Checks to New
+// directly.
 func DefaultChecks() []Check {
 	return []Check{
+		NewGoBinaryCheck(),
 		NewToolchainCheck(),
 		NewToolsCheck(),
 		NewWorkspaceCheck(),

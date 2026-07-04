@@ -113,16 +113,16 @@ func (c *captureRootCheck) Run(_ context.Context, root string) Finding {
 	return Finding{Severity: SeverityOK, Title: "ok"}
 }
 
-func TestDefaultChecks_ContainsAllThree(t *testing.T) {
+func TestDefaultChecks_ContainsAll(t *testing.T) {
 	defaults := DefaultChecks()
-	if len(defaults) != 3 {
-		t.Fatalf("DefaultChecks len = %d, want 3", len(defaults))
-	}
 	names := make([]string, 0, len(defaults))
 	for _, c := range defaults {
 		names = append(names, c.Name())
 	}
-	want := []string{toolchainCheckName, toolsCheckName, workspaceCheckName}
+	want := []string{goBinaryCheckName, toolchainCheckName, toolsCheckName, workspaceCheckName}
+	if len(names) != len(want) {
+		t.Fatalf("DefaultChecks names = %v, want %v", names, want)
+	}
 	for i, w := range want {
 		if names[i] != w {
 			t.Errorf("DefaultChecks[%d] name = %q, want %q", i, names[i], w)
