@@ -11,7 +11,6 @@ import (
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
-	"gioui.org/io/pointer"
 	"gioui.org/io/transfer"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
@@ -24,15 +23,15 @@ import (
 // interoperates with Gio's own text widgets.
 const editorTextMIME = "application/text"
 
-// editorInputTag is the event tag identifying the editor as a focus and
-// pointer target. A distinct unexported type keeps the tag from colliding
-// with any other tag routed through the same op list.
+// editorInputTag is the event tag identifying the editor as a focus target.
+// A distinct unexported type keeps the tag from colliding with any other tag
+// routed through the same op list.
 type editorInputTag struct{}
 
-// registerInput marks area as the editor's focus and pointer target and
-// installs the focus/pointer/transfer op needed to route keys and clicks to
-// it. It must be called while area (the editor's clip rectangle) is the
-// active clip so pointer hits are bounded to the editor body.
+// registerInput marks area as the editor's focus target and installs the
+// focus/transfer op needed to route keys and paste data to it. Mouse
+// gestures are registered separately by registerMouse. It must be called
+// while area (the editor's clip rectangle) is the active clip.
 func (e *IDEEditor) registerInput(gtx layout.Context, area clip.Rect) {
 	defer area.Push(gtx.Ops).Pop()
 	event.Op(gtx.Ops, e.inputTag())
@@ -41,15 +40,16 @@ func (e *IDEEditor) registerInput(gtx layout.Context, area clip.Rect) {
 // inputTag returns the stable focus/pointer tag for this editor.
 func (e *IDEEditor) inputTag() editorInputTag { return editorInputTag{} }
 
-// handleInput consumes all pending editor input events for the frame and
-// applies each to the active view or buffer. It returns true when any event
-// mutated workbench state (buffer text or selection) so the caller can
-// invalidate the window. Focus requests and clipboard round-trips also
-// report true so the resulting frame is scheduled.
+// handleInput consumes all pending editor key and transfer events for the
+// frame and applies each to the active view or buffer. It returns true when
+// any event mutated workbench state (buffer text or selection) so the caller
+// can invalidate the window. Clipboard round-trips also report true so the
+// resulting frame is scheduled.
 //
 // handleInput is a no-op unless the editor holds focus, except that it always
-// processes the pointer-press that requests focus and the transfer.DataEvent
-// that completes a paste (both may arrive while unfocused).
+// processes the transfer.DataEvent that completes a paste (which may arrive
+// while unfocused). Mouse input, including the press that focuses the
+// editor, is handled by processMouse.
 func (e *IDEEditor) handleInput(gtx layout.Context, wb *Workbench) bool {
 	changed := false
 	for {
@@ -58,14 +58,6 @@ func (e *IDEEditor) handleInput(gtx layout.Context, wb *Workbench) bool {
 			return changed
 		}
 		switch ev := ev.(type) {
-		case pointer.Event:
-			// A press anywhere in the editor body focuses it so subsequent
-			// keystrokes route here. Caret placement from the click position
-			// is intentionally not implemented (see report).
-			if ev.Kind == pointer.Press {
-				gtx.Execute(key.FocusCmd{Tag: e.inputTag()})
-				changed = true
-			}
 		case key.EditEvent:
 			// Typed text (including multi-byte input) replaces the selection.
 			// Plain printable keys arrive here (not as key.Event), so this is
@@ -108,15 +100,13 @@ func (e *IDEEditor) handleInput(gtx layout.Context, wb *Workbench) bool {
 }
 
 // inputFilters returns the event filters the editor listens for: focus and
-// text-edit events targeting its tag, the paste transfer target, a pointer
-// press for focus, and the full set of key filters for movement and editing
-// shortcuts.
+// text-edit events targeting its tag, the paste transfer target, and the
+// full set of key filters for movement and editing shortcuts.
 func (e *IDEEditor) inputFilters() []event.Filter {
 	tag := e.inputTag()
 	return []event.Filter{
 		key.FocusFilter{Target: tag},
 		transfer.TargetFilter{Target: tag, Type: editorTextMIME},
-		pointer.Filter{Target: tag, Kinds: pointer.Press},
 
 		key.Filter{Focus: tag, Name: key.NameReturn, Optional: key.ModShift},
 		key.Filter{Focus: tag, Name: key.NameEnter, Optional: key.ModShift},

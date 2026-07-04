@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 
+	"gioui.org/gesture"
+	"gioui.org/io/key"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -34,6 +36,15 @@ const diagnosticUnderlinePx = 2
 type IDEEditor struct {
 	list widget.List
 	find FindState
+
+	// Mouse gesture state for the editor body. click detects presses and
+	// multi-clicks, drag reports pointer motion while pressed, and
+	// mouseDragging is true between a caret-placing press and its release so
+	// only drags that started in the editor extend the selection. All three
+	// are touched only on the UI goroutine during Layout.
+	click         gesture.Click
+	drag          gesture.Drag
+	mouseDragging bool
 
 	// Highlight cache. lastSpans holds one span slice per line for the
 	// buffer identified by lastBufferID at sequence lastSeq.
@@ -67,6 +78,12 @@ type IDEEditor struct {
 	// is touched only on the UI goroutine (during Layout), so it needs no
 	// lock.
 	completionList widget.List
+
+	// autoFocusView is the view the editor last requested keyboard focus
+	// for. When the active view changes (a file is opened or a tab is
+	// switched), Layout focuses the editor once so typing works
+	// immediately without requiring a click. UI-goroutine only.
+	autoFocusView editor.ViewID
 }
 
 // NewIDEEditor constructs an editor widget with a vertical scroll list.
@@ -100,10 +117,16 @@ func (e *IDEEditor) Layout(gtx layout.Context, th *IDETheme, wb *Workbench) (lay
 	// cross-goroutine writes.
 	e.applyPendingReveal()
 
-	// Route pointer clicks and (when focused) keys to the editor. Registered
-	// over the whole editor body before the list draws.
+	// Route keys (when focused) and mouse gestures to the editor. Both areas
+	// cover the whole editor body and are registered before the list draws;
+	// events queued since the last frame are applied here, before painting,
+	// so a click's caret move is visible in this same frame.
 	e.registerInput(gtx, clip.Rect{Max: gtx.Constraints.Max})
+	e.registerMouse(gtx, clip.Rect{Max: gtx.Constraints.Max})
 	changed := e.handleInput(gtx, wb)
+	if e.processMouse(gtx, th, wb) {
+		changed = true
+	}
 
 	tab, ok := wb.ActiveTab()
 	if !ok {
@@ -112,6 +135,14 @@ func (e *IDEEditor) Layout(gtx layout.Context, th *IDETheme, wb *Workbench) (lay
 	buf, err := wb.ActiveBuffer()
 	if err != nil || buf == nil {
 		return e.layoutEmpty(gtx, th), changed
+	}
+
+	// Focus the editor when the active view changes (file opened or tab
+	// switched) so typing works immediately without a click. The find
+	// bar keeps its own focus while open: skip refocusing then.
+	if tab.ViewID != e.autoFocusView && !e.find.Open() {
+		e.autoFocusView = tab.ViewID
+		gtx.Execute(key.FocusCmd{Tag: e.inputTag()})
 	}
 
 	view, _ := wb.ActiveView()
