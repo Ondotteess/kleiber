@@ -362,20 +362,23 @@ type CommandPaletteSnapshot struct {
 }
 ```
 
-**Status:** State adapter, presenter, typed controller, shell foundation, and a
-minimal read-only Gio renderer/window slice are implemented. ADR-001 selects
-`gioui`, now present in `go.mod`; the actual Gio window loop is isolated behind
-the `gio` build tag so normal core checks remain lightweight. The
-`cmd/kleiber` Gio launcher owns the required `gioapp.Main()` call while
-`internal/ui` owns only the window event loop and render model, and default
-builds reject window mode before opening a project. The
-`kleiber experimental-ui --smoke [path]` command is a no-window verification path
-that builds the app session, shell, and render model, prints a deterministic
-summary, and does not require `-tags=gio` or start `gopls`. Manual native-window verification is tracked in
-[`docs/contributing/gio-smoke.md`](../contributing/gio-smoke.md), which defines
-the expected visual sections, close behavior, and failure-capture steps. The UI
-is still experimental: no editor widget, file tree interaction, palette command
-execution, or production input handling exists.
+**Status:** A working IDE window is implemented behind the `gio` build tag and
+launched with `kleiber edit [path]`. It composes a `Workbench` (open editor
+tabs and the file-tree explorer) with an `LSPController` (diagnostics store plus
+completion/hover/definition over the gopls supervisor) and renders: a clickable
+file tree, editor tabs, a custom text editor with Go syntax highlighting, line
+numbers, rune-aware keyboard editing, an in-file find bar, diagnostic
+underlines, a problems panel, a status bar, completion/hover/definition popups,
+and an embedded PTY terminal with Go command buttons. ADR-001 selects `gioui`;
+the window loop and widgets are isolated behind the `gio` tag so normal core
+checks stay lightweight, and the `cmd/kleiber` launcher owns the required
+`gioapp.Main()` call.
+
+An earlier read-only render model (`BuildState`/`Presenter`/`Controller`/`Shell`
+/`BuildGioRenderModel` and the `kleiber experimental-ui` command) predates the
+IDE window and remains as a headless, no-`gopls` verification path. Manual
+native-window verification is tracked in
+[`docs/contributing/gio-smoke.md`](../contributing/gio-smoke.md).
 Implemented: `BuildState(session)` converts `internal/app.Session` snapshots
 into pure view-model data for commands, buffers, views, modules, packages, and
 files using deterministic sorting and defensive slices. `Presenter` owns the

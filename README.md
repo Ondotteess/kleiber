@@ -2,18 +2,20 @@
 
 Kleiber is an AI-native IDE for Go, written in Go. It treats concurrency, idioms, and runtime data as first-class — not bolted-on extensions.
 
-> **Status:** pre-alpha. Core CLI and backend foundations are in progress. No usable UI yet.
+> **Status:** MVP. A working Go IDE — file tree, syntax-highlighted editing, live
+> gopls diagnostics/completion/hover/go-to-definition, and an embedded terminal —
+> runs behind the `gio` build tag via `kleiber edit`.
 > See [`docs/product/roadmap.md`](docs/product/roadmap.md) for the full milestone plan and
 > [`docs/product/vision.md`](docs/product/vision.md) for the product story.
 
-## Development status (2026-05-27)
+## Development status (2026-07-04)
 
 - [x] Documentation: vision, market analysis, architecture, agent protocol, contributing guides
 - [x] Phase 0 — Repo bootstrap: Go module, build scripts, CI, package skeletons, CLI entrypoint
-- [ ] **Phase 1 — Core foundations** (in progress): JSON config, logging, typed event bus, app/core composition layer with bootstrap/state snapshots, project model with go.work multi-module package loading/manual refresh/snapshots, command dispatcher, editor/project/LSP command registration, doctor checks
-- [ ] Phase 2 — Editor engine (in progress): buffer + undo/redo, view/cursor/selection with external-edit transform, engine-managed buffers/views, and app-owned dispatcher-backed file/buffer/view actions; syntax highlighting pending
-- [ ] Phase 3 — LSP client (in progress): gopls subprocess + LSP operations, **editor↔LSP bridge** (didOpen/Change/Close + SaveAs lifecycle + UTF-16-safe diagnostics/navigation routing), completions, buffer formatting, format+save capability for app-level format-on-save, and tracked document snapshot/replay foundation; auto-restart policy pending
-- [ ] Phase 4 — UI layer v1 (gioui): pure state/view-model adapter, presenter, typed action/controller, shell boundary, minimal read-only Gio renderer, and first command-palette navigation shell behind the `gio` build tag exist; editor widget/input and palette command execution pending
+- [x] **Phase 1 — Core foundations**: JSON config, logging (with file output + `--debug`), typed event bus, app/core composition layer with bootstrap/state snapshots, project model with go.work multi-module loading + a filesystem file-tree, command dispatcher, doctor checks (including a `go`-on-PATH check)
+- [x] Phase 2 — Editor engine: buffer + undo/redo, rune-aware view/cursor/selection with external-edit transform, engine-managed buffers/views, in-file search, auto-indent, and Go syntax highlighting via `go/scanner`
+- [x] Phase 3 — LSP client: supervised gopls subprocess with **automatic crash restart**, editor↔LSP bridge (didOpen/Change/Save/Close + UTF-16-safe diagnostics/navigation), diagnostics, completion, hover, definition, formatting, and a debug JSON-RPC traffic trace
+- [x] Phase 4 — UI layer v1 (gioui): a real IDE window — file tree, editor tabs, syntax highlighting, keyboard editing, find bar, diagnostics + problems panel + status bar, completion/hover/definition popups, and an embedded PTY terminal with `go run/build/test` buttons
 - [ ] Phase 5 — Debugger & test runner (Delve via DAP, coverage, benchmarks)
 - [ ] Phase 6 — AI bridge (providers, gopls MCP, validated refactors)
 - [ ] Phase 7 — Runtime awareness (pprof, concurrency visualizer, traces)
@@ -44,6 +46,41 @@ powershell.exe -ExecutionPolicy Bypass -File .\scripts\check.ps1
 
 If your PowerShell policy already allows local scripts, `./scripts/check.ps1`
 works too.
+
+## Using the IDE
+
+The IDE window is built behind the `gio` build tag. It needs `go` and `gopls`
+on `PATH` (`go install golang.org/x/tools/gopls@latest`); run `kleiber doctor`
+to check your toolchain.
+
+```powershell
+go run -tags=gio ./cmd/kleiber edit [path]
+```
+
+`path` is a project directory (opened as the workspace) or a file to open;
+it defaults to the current directory. The window shows a file tree, editor
+tabs with Go syntax highlighting, a problems panel and status bar, and an
+embedded terminal. gopls starts automatically and reports diagnostics as you
+type. `--debug` raises logging and records the gopls JSON-RPC traffic;
+`--log-file PATH` overrides the log location (default: the user cache dir).
+
+Keyboard shortcuts (use `Cmd` instead of `Ctrl` on macOS):
+
+| Shortcut | Action |
+| --- | --- |
+| `Ctrl+S` | Save (formats via gopls when `formatOnSave` is enabled) |
+| `Ctrl+F` | Find in file |
+| `Ctrl+Space` | Completion |
+| `F1` | Hover |
+| `F12` | Go to definition |
+| `Ctrl+M` | Toggle problems panel |
+| `Ctrl+J` | Toggle terminal (Run / Build / Test / Mod Tidy buttons) |
+| `Ctrl+W` | Close tab |
+
+On Linux the Gio window needs the usual desktop dev libraries (Vulkan/OpenGL,
+X11 or Wayland, Wayland/xkbcommon headers); see the
+[Gio installation notes](https://gioui.org/doc/install). The rest of the
+codebase is OS-independent and cross-compiles cleanly.
 
 Experimental UI slice:
 

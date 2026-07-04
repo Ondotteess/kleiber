@@ -2,7 +2,7 @@
 
 This roadmap is a living document. Dates are best-effort estimates, not commitments.
 
-Last updated: **2026-05-27**
+Last updated: **2026-07-04**
 
 ## Guiding principles
 
@@ -24,23 +24,26 @@ Deliverables:
 
 Out of scope: debugger, tests, AI, multi-window, themes beyond default.
 
-Current implementation checkpoint:
-- Runnable CLI surface: `kleiber --version`, `kleiber help`, and `kleiber doctor [path]`.
-- Core foundations exist for JSON config, logging, typed events, command dispatch,
-  go.work-aware project/module/package loading with manual refresh, filesystem watching,
-  defensive project snapshots, an app/core composition layer with bootstrap,
-  read-only state snapshots, user-facing editor/project command registration,
-  editor buffers/views, a pure UI state/view-model adapter, presenter boundary,
-  typed UI action/controller boundary, UI shell boundary, and a minimal
-  sectioned read-only Gio renderer behind the `gio` build tag, config-gated
-  save/format-on-save orchestration, and LSP bridge operations
-  including tracked-document snapshot/replay groundwork for a future restart supervisor.
-- UI is still not usable as an editor; `internal/ui` contains pure
-  state/presenter/controller/shell foundations and an experimental read-only Gio
-  window path plus no-window smoke/model verification, but no editor widget,
-  file tree interaction, palette command execution, or production input
-  handling. The Gio window has a bounded command-palette shell for open/close
-  and keyboard selection navigation. Manual native-window visual smoke is documented in
+Current implementation checkpoint — **Milestone 1 delivered**:
+- `kleiber edit [path]` opens a working IDE window (behind the `gio` build tag):
+  a filesystem file tree with open-on-click, editor tabs, Go syntax highlighting
+  via `go/scanner`, line numbers and current-line highlight, and rune-aware
+  keyboard editing (typing, movement, selection, undo/redo, clipboard, in-file
+  find, `Ctrl+S` save with config-gated format-on-save).
+- gopls runs as a supervised child process with automatic crash restart and a
+  status indicator; the editor↔LSP bridge drives didOpen/Change/Save/Close and
+  UTF-16-safe routing. The UI shows live diagnostics (underlines + a problems
+  panel), completion (`Ctrl+Space`), hover (`F1`), and go-to-definition (`F12`,
+  cross-file). A `--debug` flag records the JSON-RPC traffic to a log file.
+- An embedded PTY terminal (ConPTY on Windows, `creack/pty` elsewhere) with a
+  full VT/ANSI parser renders in the window and runs `go run` / `go build` /
+  `go test` / `go mod tidy` in the module root, with interactive input and
+  ANSI colors.
+- Also runnable headless: `kleiber --version`, `kleiber help`, `kleiber doctor
+  [path]`, and the older `kleiber experimental-ui --smoke [path]` model dump.
+- Still open for a later pass: mouse click-to-caret, incremental didChange,
+  find-references UI, and richer completion (LSP TextEdit application). Manual
+  native-window visual smoke remains documented in
   `docs/contributing/gio-smoke.md`.
 
 ## Milestone 2 — Debugger and Test Runner (target: Q4 2026)
