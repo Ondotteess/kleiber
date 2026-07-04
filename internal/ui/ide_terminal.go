@@ -4,6 +4,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"image/color"
 	"strings"
@@ -35,6 +36,8 @@ type terminalInputTag struct{}
 // IDETerminal is the embedded terminal panel: a toolbar of Go-command buttons
 // over a live monospace color grid rendered from a terminal.Session. It routes
 // keyboard input to the session when focused, so the terminal is interactive.
+// The grid supports mouse-wheel scrollback: wheel up reveals evicted lines,
+// and typing or starting a session snaps the view back to the live grid.
 //
 // The panel owns at most one session at a time. Starting a new one (via a
 // toolbar button or the first Layout) closes the previous session first. A
@@ -64,6 +67,17 @@ type IDETerminal struct {
 	// ui.GoCommand, aligned with GoCommands() order.
 	shell  widget.Clickable
 	goCmds []*widget.Clickable
+
+	// Scrollback view state, confined to the window's frame goroutine
+	// (Layout, its input handling, and startSession all run there; Close
+	// does not touch it), so it needs no lock. viewOffset is how many lines
+	// the view is scrolled back into scrollback, 0 meaning the live bottom
+	// view. lastSbLen is the scrollback length seen on the previous frame,
+	// used to keep the view anchored while new lines are evicted.
+	// scrollAccum carries sub-line wheel remainders between scroll events.
+	viewOffset  int
+	lastSbLen   int
+	scrollAccum float32
 }
 
 // NewIDETerminal constructs an empty terminal panel with no session. The first
@@ -205,15 +219,13 @@ func (t *IDETerminal) button(gtx layout.Context, th *IDETheme, btn *widget.Click
 }
 
 // layoutGrid registers grid input, resizes the session to the measured size,
-// and draws the current session's screen snapshot. With no session it fills
-// the area with the terminal background.
+// and draws the current session's screen through the scrollback view: at view
+// offset zero it shows the live grid and cursor, while scrolled back it shows
+// older lines with a muted indicator instead of the cursor. With no session
+// it fills the area with the terminal background.
 func (t *IDETerminal) layoutGrid(gtx layout.Context, th *IDETheme) layout.Dimensions {
 	size := gtx.Constraints.Max
 	paint.FillShape(gtx.Ops, th.TerminalBg, clip.Rect{Max: size}.Op())
-
-	area := clip.Rect{Max: size}
-	t.registerInput(gtx, area)
-	t.handleInput(gtx)
 
 	cellW := th.CellWidth(gtx)
 	lineH := th.LineHeight(gtx)
@@ -227,11 +239,94 @@ func (t *IDETerminal) layoutGrid(gtx layout.Context, th *IDETheme) layout.Dimens
 	}
 	t.resizeIfChanged(cols, rows)
 
-	if s := t.current(); s != nil {
-		snap := s.Screen().Snapshot()
-		t.drawSnapshot(gtx, th, snap, cellW, lineH)
+	s := t.current()
+	var snap terminal.ScreenSnapshot
+	if s != nil {
+		snap = s.Screen().Snapshot()
+		t.syncScrollback(snap.ScrollbackLen)
+	} else {
+		t.syncScrollback(0)
+	}
+
+	area := clip.Rect{Max: size}
+	t.registerInput(gtx, area)
+	t.handleInput(gtx, lineH)
+
+	if s != nil {
+		clipStack := area.Push(gtx.Ops)
+		t.drawCells(gtx, th, t.viewCells(s, snap), cellW, lineH)
+		if t.viewOffset == 0 {
+			if snap.CursorVisible && snap.CursorY >= 0 && snap.CursorY < len(snap.Cells) {
+				t.drawCursor(gtx, th, snap, cellW, lineH)
+			}
+		} else {
+			t.drawScrollbackIndicator(gtx, th, size, snap.ScrollbackLen, cellW, lineH)
+		}
+		clipStack.Pop()
 	}
 	return layout.Dimensions{Size: size}
+}
+
+// syncScrollback folds this frame's scrollback length into the view state:
+// while scrolled back, growth (lines evicted since the last frame) is added
+// to the offset so the same lines stay visible instead of the view drifting
+// with new output, and the offset is clamped to what the ring still holds.
+func (t *IDETerminal) syncScrollback(sbLen int) {
+	if d := sbLen - t.lastSbLen; d > 0 && t.viewOffset > 0 {
+		t.viewOffset += d
+	}
+	t.lastSbLen = sbLen
+	t.setViewOffset(t.viewOffset)
+}
+
+// setViewOffset sets the scrollback view offset clamped to [0, lastSbLen].
+func (t *IDETerminal) setViewOffset(n int) {
+	if n < 0 {
+		n = 0
+	}
+	if n > t.lastSbLen {
+		n = t.lastSbLen
+	}
+	t.viewOffset = n
+}
+
+// viewCells returns the rows the grid draws for the current view offset. The
+// logical buffer is the scrollback (oldest first) followed by the live grid;
+// with offset N the view starts N lines before the live grid, so the first
+// min(N, rows) view rows are the tail of the scrollback and the rest are the
+// top rows of the live grid. Offset zero returns the live grid as-is. The
+// scrollback rows are fetched with one ScrollbackLines call; a line the ring
+// no longer holds draws blank.
+func (t *IDETerminal) viewCells(s *terminal.Session, snap terminal.ScreenSnapshot) [][]terminal.Cell {
+	n := t.viewOffset
+	if n <= 0 {
+		return snap.Cells
+	}
+	rows := len(snap.Cells)
+	sbLen := snap.ScrollbackLen
+	if n > sbLen {
+		n = sbLen
+	}
+	start := sbLen - n
+	sbCount := n
+	if sbCount > rows {
+		sbCount = rows
+	}
+	sbLines := s.Screen().ScrollbackLines(start, sbCount)
+	view := make([][]terminal.Cell, rows)
+	for r := 0; r < rows; r++ {
+		logical := start + r
+		if logical < sbLen {
+			if r < len(sbLines) {
+				view[r] = sbLines[r]
+			}
+			continue
+		}
+		if g := logical - sbLen; g < rows {
+			view[r] = snap.Cells[g]
+		}
+	}
+	return view
 }
 
 // registerInput marks area as the terminal grid's focus and pointer target so
@@ -246,19 +341,24 @@ func (t *IDETerminal) registerInput(gtx layout.Context, area clip.Rect) {
 func (t *IDETerminal) inputTag() terminalInputTag { return terminalInputTag{} }
 
 // handleInput consumes the terminal's pending input events for the frame. A
-// pointer press focuses the grid; while focused, typed text and named control
-// keys are written to the session as the bytes a terminal expects. It is a
-// no-op when no session is running.
-func (t *IDETerminal) handleInput(gtx layout.Context) {
+// pointer press focuses the grid, a wheel scroll moves the scrollback view;
+// while focused, typed text and named control keys are written to the session
+// as the bytes a terminal expects. lineH converts wheel pixel deltas to grid
+// lines. Writing is a no-op when no session is running.
+func (t *IDETerminal) handleInput(gtx layout.Context, lineH int) {
+	filters := t.inputFilters(lineH)
 	for {
-		ev, ok := gtx.Event(t.inputFilters()...)
+		ev, ok := gtx.Event(filters...)
 		if !ok {
 			return
 		}
 		switch ev := ev.(type) {
 		case pointer.Event:
-			if ev.Kind == pointer.Press {
+			switch ev.Kind {
+			case pointer.Press:
 				gtx.Execute(key.FocusCmd{Tag: t.inputTag()})
+			case pointer.Scroll:
+				t.scrollBy(ev.Scroll.Y, lineH)
 			}
 		case key.EditEvent:
 			t.writeString(ev.Text)
@@ -273,17 +373,48 @@ func (t *IDETerminal) handleInput(gtx layout.Context) {
 	}
 }
 
+// scrollBy folds one wheel delta (in pixels, positive toward the live view)
+// into the scrollback offset, carrying the sub-line remainder in scrollAccum
+// so slow wheels still make progress across events.
+func (t *IDETerminal) scrollBy(deltaY float32, lineH int) {
+	if lineH <= 0 {
+		return
+	}
+	t.scrollAccum += deltaY / float32(lineH)
+	step := int(t.scrollAccum)
+	if step == 0 {
+		return
+	}
+	t.scrollAccum -= float32(step)
+	t.setViewOffset(t.viewOffset - step)
+}
+
+// scrollRange bounds the wheel deltas the grid accepts: negative (up) through
+// the scrollback lines still above the view, positive (down) through the
+// current offset back to the live view.
+func (t *IDETerminal) scrollRange(lineH int) pointer.ScrollRange {
+	return pointer.ScrollRange{
+		Min: -(t.lastSbLen - t.viewOffset) * lineH,
+		Max: t.viewOffset * lineH,
+	}
+}
+
 // inputFilters returns the event filters the terminal grid listens for: focus
-// events and a pointer press targeting its tag, plus the named keys it maps to
-// terminal control sequences. Printable text arrives as key.EditEvent (covered
-// by the focus filter), so no per-letter key filters are needed except the
-// Ctrl+letter range, which is registered as the whole alphabet with ModCtrl
-// required.
-func (t *IDETerminal) inputFilters() []event.Filter {
+// events, pointer presses and wheel scrolls (bounded by scrollRange, in
+// pixels of lineH-tall lines) targeting its tag, plus the named keys it maps
+// to terminal control sequences. Printable text arrives as key.EditEvent
+// (covered by the focus filter), so no per-letter key filters are needed
+// except the Ctrl+letter range, which is registered as the whole alphabet
+// with ModCtrl required.
+func (t *IDETerminal) inputFilters(lineH int) []event.Filter {
 	tag := t.inputTag()
 	filters := []event.Filter{
 		key.FocusFilter{Target: tag},
-		pointer.Filter{Target: tag, Kinds: pointer.Press},
+		pointer.Filter{
+			Target:  tag,
+			Kinds:   pointer.Press | pointer.Scroll,
+			ScrollY: t.scrollRange(lineH),
+		},
 
 		key.Filter{Focus: tag, Name: key.NameReturn},
 		key.Filter{Focus: tag, Name: key.NameEnter},
@@ -351,13 +482,13 @@ func controlBytes(ke key.Event) []byte {
 	return nil
 }
 
-// drawSnapshot renders one screen snapshot into the grid: each cell's
-// background (when non-default) is filled, each non-blank rune is drawn in its
-// foreground color, and the cursor block is drawn when visible. Inverse cells
-// swap foreground and background before color resolution. Runs of same-style
-// cells are batched into one label to reduce label churn.
-func (t *IDETerminal) drawSnapshot(gtx layout.Context, th *IDETheme, snap terminal.ScreenSnapshot, cellW, lineH int) {
-	for y, row := range snap.Cells {
+// drawCells renders the view rows into the grid: each cell's background
+// (when non-default) is filled and each non-blank rune is drawn in its
+// foreground color. Inverse cells swap foreground and background before
+// color resolution. Runs of same-style cells are batched into one label to
+// reduce label churn. Nil rows draw as blank lines.
+func (t *IDETerminal) drawCells(gtx layout.Context, th *IDETheme, rows [][]terminal.Cell, cellW, lineH int) {
+	for y, row := range rows {
 		yPx := y * lineH
 		// First pass: backgrounds. Filled per contiguous run of equal color.
 		x := 0
@@ -378,10 +509,29 @@ func (t *IDETerminal) drawSnapshot(gtx layout.Context, th *IDETheme, snap termin
 		// Second pass: foreground runes batched by equal foreground color.
 		t.drawRowText(gtx, th, row, yPx, cellW, lineH)
 	}
+}
 
-	if snap.CursorVisible && snap.CursorY >= 0 && snap.CursorY < len(snap.Cells) {
-		t.drawCursor(gtx, th, snap, cellW, lineH)
+// drawScrollbackIndicator draws a muted "[scrollback N/M]" tag over the
+// terminal background in the top-right corner of the grid while the view is
+// scrolled back, where N is the view offset and M the retained line count.
+func (t *IDETerminal) drawScrollbackIndicator(gtx layout.Context, th *IDETheme, size image.Point, sbLen, cellW, lineH int) {
+	text := fmt.Sprintf("[scrollback %d/%d]", t.viewOffset, sbLen)
+	w := (len(text) + 1) * cellW
+	x := size.X - w
+	if x < 0 {
+		x = 0
 	}
+	stack := op.Offset(image.Pt(x, 0)).Push(gtx.Ops)
+	paint.FillShape(gtx.Ops, th.TerminalBg, clip.Rect{Max: image.Point{X: w, Y: lineH}}.Op())
+	label := material.Label(th.Theme, th.Theme.TextSize, text)
+	label.Font = th.MonoFont()
+	label.Color = th.Muted
+	label.MaxLines = 1
+	cellGtx := gtx
+	cellGtx.Constraints.Min = image.Point{}
+	cellGtx.Constraints.Max = image.Point{X: w, Y: lineH}
+	label.Layout(cellGtx)
+	stack.Pop()
 }
 
 // drawRowText draws the runes of one row, batching a maximal run of cells that
@@ -511,9 +661,12 @@ func (t *IDETerminal) writeString(s string) {
 	t.write([]byte(s))
 }
 
-// write sends raw bytes to the running session as keyboard input. Write errors
-// (e.g. the child already exited) are non-fatal and ignored.
+// write sends raw bytes to the running session as keyboard input and snaps
+// the scrollback view back to the live grid. Write errors (e.g. the child
+// already exited) are non-fatal and ignored.
 func (t *IDETerminal) write(data []byte) {
+	t.viewOffset = 0
+	t.scrollAccum = 0
 	if s := t.current(); s != nil {
 		_, _ = s.Write(data)
 	}
@@ -524,7 +677,12 @@ func (t *IDETerminal) write(data []byte) {
 // directory at the current grid size. It starts one goroutine that forwards the
 // session's screen-change signals to the invalidate hook and ends when the
 // session is closed. Start failures leave the panel session-less but usable.
+// Starting a session resets the scrollback view to the live grid.
 func (t *IDETerminal) startSession(wb *Workbench, command []string) {
+	t.viewOffset = 0
+	t.lastSbLen = 0
+	t.scrollAccum = 0
+
 	t.mu.Lock()
 	prev := t.session
 	t.session = nil
