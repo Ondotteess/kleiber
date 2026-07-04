@@ -89,6 +89,13 @@ type IDETheme struct {
 	// PopupSelected fills the highlighted row of the completion popup.
 	PopupSelected color.NRGBA
 
+	// TerminalBg fills the embedded terminal panel's grid behind the cells.
+	// It matches the ColorDefault background used by termColorToNRGBA so a
+	// screen full of default-colored cells reads as one uniform surface.
+	TerminalBg color.NRGBA
+	// TerminalToolbar fills the terminal panel's toolbar strip above the grid.
+	TerminalToolbar color.NRGBA
+
 	// cellWidthCache caches the measured cell width keyed by the metric and
 	// text size it was measured at, so the off-screen sample is laid out at
 	// most once per unique rendering context.
@@ -137,6 +144,8 @@ func NewIDETheme() *IDETheme {
 		PopupBorder:       rgb(0x454545),
 		PopupText:         rgb(0xd4d4d4),
 		PopupSelected:     rgb(0x094771),
+		TerminalBg:        rgb(0x1e1e1e),
+		TerminalToolbar:   rgb(0x2d2d2d),
 		cellWidthCache:    map[cellMetricKey]int{},
 		lineHeightCache:   map[cellMetricKey]int{},
 	}

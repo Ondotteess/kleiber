@@ -18,10 +18,11 @@ import (
 
 // Default IDE window geometry and title used when options leave them unset.
 const (
-	defaultIDEWidthDP  = 1100
-	defaultIDEHeightDP = 740
-	defaultIDETitle    = "Kleiber"
-	ideTreeWidthDP     = 260
+	defaultIDEWidthDP   = 1100
+	defaultIDEHeightDP  = 740
+	defaultIDETitle     = "Kleiber"
+	ideTreeWidthDP      = 260
+	ideTerminalHeightDP = 220
 )
 
 // ErrNilWorkbench is returned when RunIDEWindow is called without a
@@ -36,10 +37,16 @@ type ideWindow struct {
 	editor    *IDEEditor
 	statusBar *IDEStatusBar
 	problems  *IDEProblems
+	terminal  *IDETerminal
 
 	// showProblems tracks whether the problems panel is expanded. It is
 	// toggled by Ctrl+M and by clicking the status bar's problem count.
 	showProblems bool
+
+	// showTerminal tracks whether the embedded terminal panel is expanded. It
+	// is toggled by Ctrl+J; the panel starts a default shell on its first
+	// Layout after being shown.
+	showTerminal bool
 }
 
 // newIDEWindow constructs the widget set for the IDE window.
@@ -51,6 +58,7 @@ func newIDEWindow() *ideWindow {
 		editor:    NewIDEEditor(),
 		statusBar: NewIDEStatusBar(),
 		problems:  NewIDEProblems(),
+		terminal:  NewIDETerminal(),
 	}
 }
 
@@ -89,12 +97,17 @@ func RunIDEWindow(ctx context.Context, wb *Workbench, opts IDEWindowOptions) err
 	// Let async LSP result handlers schedule redraws once results are stored.
 	// Window.Invalidate is goroutine-safe in Gio.
 	view.editor.SetInvalidate(w.Invalidate)
+	// The terminal's per-session goroutine repaints on every screen change.
+	view.terminal.SetInvalidate(w.Invalidate)
 	var ops op.Ops
 
 	for {
 		event := w.Event()
 		switch event := event.(type) {
 		case gioapp.DestroyEvent:
+			// Kill the terminal's child process before the launcher exits via
+			// os.Exit, which would otherwise orphan the shell or go command.
+			view.terminal.Close()
 			if event.Err != nil && !errors.Is(event.Err, context.Canceled) {
 				return event.Err
 			}
@@ -112,14 +125,16 @@ func RunIDEWindow(ctx context.Context, wb *Workbench, opts IDEWindowOptions) err
 
 // handleIDEKeys processes the window-level key bindings that are independent
 // of editor focus: Ctrl+W closes the active tab, Ctrl+F opens the find bar
-// (focusing its query field), and Ctrl+M toggles the problems panel. Per-editor
-// movement and text editing are handled inside IDEEditor while it holds focus.
+// (focusing its query field), Ctrl+M toggles the problems panel, and Ctrl+J
+// toggles the embedded terminal panel. Per-editor movement and text editing
+// are handled inside IDEEditor while it holds focus.
 func (v *ideWindow) handleIDEKeys(gtx layout.Context, wb *Workbench, w *gioapp.Window) {
 	for {
 		ev, ok := gtx.Event(
 			key.Filter{Name: key.Name("W"), Required: key.ModShortcut},
 			key.Filter{Name: key.Name("F"), Required: key.ModShortcut},
 			key.Filter{Name: key.Name("M"), Required: key.ModShortcut},
+			key.Filter{Name: key.Name("J"), Required: key.ModShortcut},
 		)
 		if !ok {
 			return
@@ -142,13 +157,19 @@ func (v *ideWindow) handleIDEKeys(gtx layout.Context, wb *Workbench, w *gioapp.W
 		case key.Name("M"):
 			v.showProblems = !v.showProblems
 			w.Invalidate()
+		case key.Name("J"):
+			// The panel starts a default shell on its next Layout when shown
+			// with no session yet.
+			v.showTerminal = !v.showTerminal
+			w.Invalidate()
 		}
 	}
 }
 
-// layout draws the whole window: file tree, a divider, then the tab strip
-// over the editor. It reports whether any interaction changed state so the
-// caller can request a redraw.
+// layout draws the whole window: file tree, a divider, then the tab strip over
+// the editor, with the optional problems and terminal panels and the status bar
+// stacked below. It reports whether any interaction changed state so the caller
+// can request a redraw.
 func (v *ideWindow) layout(gtx layout.Context, wb *Workbench) bool {
 	paint.FillShape(gtx.Ops, v.theme.Background, clip.Rect{Max: gtx.Constraints.Max}.Op())
 	changed := false
@@ -191,6 +212,14 @@ func (v *ideWindow) layout(gtx layout.Context, wb *Workbench) bool {
 						changed = true
 					}
 					return dims
+				}))
+			}
+			if v.showTerminal {
+				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					termHeight := gtx.Metric.Dp(unit.Dp(ideTerminalHeightDP))
+					gtx.Constraints.Min.Y = termHeight
+					gtx.Constraints.Max.Y = termHeight
+					return v.terminal.Layout(gtx, v.theme, wb)
 				}))
 			}
 			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
