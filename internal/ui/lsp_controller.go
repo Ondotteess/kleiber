@@ -153,6 +153,26 @@ func (c *LSPController) Definition(ctx context.Context, id editor.BufferID, pos 
 	return b.DefinitionBuffer(ctx, id, pos)
 }
 
+// References requests all reference locations for the symbol at pos in
+// the given buffer, including the declaration itself.
+func (c *LSPController) References(ctx context.Context, id editor.BufferID, pos editor.Position) ([]lsp.EditorLocation, error) {
+	b := c.bridge()
+	if b == nil {
+		return nil, lsp.ErrServerNotReady
+	}
+	return b.ReferencesBuffer(ctx, id, pos, true)
+}
+
+// Format formats the given buffer in place via the language server and
+// reports how many text edits were applied.
+func (c *LSPController) Format(ctx context.Context, id editor.BufferID, opts lsp.FormattingOptions) (int, error) {
+	b := c.bridge()
+	if b == nil {
+		return 0, lsp.ErrServerNotReady
+	}
+	return b.FormatBuffer(ctx, id, opts)
+}
+
 // Close stops the diagnostics subscription and waits for its goroutine.
 // It does not stop the supervisor, whose lifecycle the caller owns. Close
 // is idempotent.

@@ -88,6 +88,12 @@ func TestLSPController_NilSupervisor_RequestsNotReady(t *testing.T) {
 	if _, err := c.Definition(ctx, 1, editor.Position{}); err != lsp.ErrServerNotReady {
 		t.Errorf("Definition err = %v, want ErrServerNotReady", err)
 	}
+	if _, err := c.References(ctx, 1, editor.Position{}); err != lsp.ErrServerNotReady {
+		t.Errorf("References err = %v, want ErrServerNotReady", err)
+	}
+	if _, err := c.Format(ctx, 1, lsp.FormattingOptions{}); err != lsp.ErrServerNotReady {
+		t.Errorf("Format err = %v, want ErrServerNotReady", err)
+	}
 }
 
 func TestLSPController_Close_Idempotent(t *testing.T) {
