@@ -66,6 +66,19 @@ type IDEEditor struct {
 	lspMu      sync.Mutex
 	completion completionState
 	hover      hoverState
+	references referencesState
+
+	// refsPanelOpen mirrors the window's references-panel visibility so the
+	// editor's key handling can route Escape and the Shift+F12 toggle
+	// correctly (the panel itself is owned by ideWindow). The window updates
+	// it every frame via setReferencesPanelOpen before the editor lays out.
+	// UI goroutine only.
+	refsPanelOpen bool
+
+	// refsCloseRequested is set when an editor key (Escape, Shift+F12) asks
+	// the window to close the references panel; the window consumes it with
+	// takeReferencesClose at the start of its next layout. UI goroutine only.
+	refsCloseRequested bool
 
 	// revealLine, when >= 0, is a scroll target set by an async
 	// go-to-definition handler and applied to list on the next Layout. It is

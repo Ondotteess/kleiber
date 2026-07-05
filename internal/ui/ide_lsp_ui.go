@@ -63,6 +63,19 @@ type hoverState struct {
 	epoch  uint64
 }
 
+// referencesState is the mutex-guarded hand-off buffer for an async
+// find-references result. The launching goroutine bumps epoch; the async
+// handler stores locations under the lock only when its epoch still matches,
+// and the window drains them with takeReferencesResult on its next frame to
+// populate and show the references panel. Ownership split: IDEEditor owns
+// only this transient result (plus the request lifecycle), while ideWindow
+// owns the panel's visibility and IDEReferences owns the displayed rows.
+type referencesState struct {
+	locations []lsp.EditorLocation
+	ready     bool
+	epoch     uint64
+}
+
 // handleLSPKey gives the LSP popups first refusal on a pressed key. It returns
 // (consumed, changed): consumed means the key was fully handled here and must
 // not reach normal editing; changed means UI state changed and a redraw is
@@ -70,14 +83,19 @@ type hoverState struct {
 //
 // Key routing:
 //   - Ctrl+Space / F1 / F12 launch completion / hover / definition and are
-//     always consumed.
+//     always consumed. Shift+F12 launches find references (or asks the window
+//     to close the references panel when it is already open); Shift+Alt+F
+//     launches format document.
 //   - While the completion popup is open, Up/Down move the selection,
 //     Enter/Tab apply it, and Esc closes it — all consumed.
 //   - Escape closes the hover tooltip (consumed only when a popup was open).
+//   - With no popup open, Escape closes the find bar if it is open, then the
+//     references panel: popups first, then find bar, then references panel.
 //   - Any other key closes open popups but is left unconsumed, so typing or
 //     caret movement still happens as usual and the now-stale popup vanishes.
 func (e *IDEEditor) handleLSPKey(gtx layout.Context, wb *Workbench, ke key.Event) (consumed, changed bool) {
 	shortcut := ke.Modifiers.Contain(key.ModShortcut)
+	shift := ke.Modifiers.Contain(key.ModShift)
 
 	// Triggers first: they apply whether or not a popup is already open.
 	switch {
@@ -88,7 +106,21 @@ func (e *IDEEditor) handleLSPKey(gtx layout.Context, wb *Workbench, ke key.Event
 		e.triggerHover(wb)
 		return true, true
 	case !shortcut && ke.Name == key.NameF12:
-		e.triggerDefinition(wb)
+		// The F12 filter admits an optional Shift: plain F12 jumps to the
+		// definition, Shift+F12 finds references. Shift+F12 while the panel
+		// is already showing toggles it closed instead of re-querying.
+		if shift {
+			if e.refsPanelOpen {
+				e.requestReferencesClose()
+			} else {
+				e.triggerReferences(wb)
+			}
+		} else {
+			e.triggerDefinition(wb)
+		}
+		return true, true
+	case ke.Name == "F" && shift && ke.Modifiers.Contain(key.ModAlt):
+		e.triggerFormat(wb)
 		return true, true
 	}
 
@@ -125,6 +157,22 @@ func (e *IDEEditor) handleLSPKey(gtx layout.Context, wb *Workbench, ke key.Event
 		}
 		e.closeHover()
 		return false, true
+	}
+
+	// No popup was open: Escape now falls through to the lesser layers in
+	// documented priority order — the find bar first (it may be open while
+	// the code editor holds focus), then the references panel. The find bar
+	// additionally closes itself on Escape while its query field is focused
+	// (see FindState.handleKeys); this branch covers editor-focused Escape.
+	if ke.Name == key.NameEscape {
+		if e.find.Open() {
+			e.find.open = false
+			return true, true
+		}
+		if e.refsPanelOpen {
+			e.requestReferencesClose()
+			return true, true
+		}
 	}
 
 	return false, false
@@ -273,6 +321,130 @@ func (e *IDEEditor) triggerDefinition(wb *Workbench) {
 		e.lspMu.Lock()
 		e.revealLine = loc.Range.Start.Line
 		e.lspMu.Unlock()
+		e.doInvalidate()
+	}()
+}
+
+// triggerReferences launches an async find-references request at the caret of
+// the active view. It is a no-op when there is no LSP controller, no active
+// view, or no active tab. A non-empty result is stored under the lock only if
+// the captured epoch is still current when it arrives; the window drains it
+// with takeReferencesResult on the frame the scheduled redraw produces and
+// opens the references panel. Empty results and errors are dropped silently.
+func (e *IDEEditor) triggerReferences(wb *Workbench) {
+	c := wb.LSP()
+	if c == nil {
+		return
+	}
+	tab, ok := wb.ActiveTab()
+	if !ok {
+		return
+	}
+	view, err := wb.ActiveView()
+	if err != nil || view == nil {
+		return
+	}
+	pos := view.Selection().Cursor
+
+	e.lspMu.Lock()
+	e.references.epoch++
+	epoch := e.references.epoch
+	e.lspMu.Unlock()
+
+	id := tab.BufferID
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), lspRequestTimeout)
+		defer cancel()
+		locs, err := c.References(ctx, id, pos)
+		if err != nil || len(locs) == 0 {
+			return
+		}
+		e.lspMu.Lock()
+		if e.references.epoch == epoch {
+			e.references.locations = locs
+			e.references.ready = true
+		}
+		e.lspMu.Unlock()
+		e.doInvalidate()
+	}()
+}
+
+// takeReferencesResult drains a pending find-references result, reporting
+// whether one was ready. The window calls it once per frame; a true return
+// hands ownership of the locations to the caller and clears the buffer so the
+// same result never populates the panel twice.
+func (e *IDEEditor) takeReferencesResult() ([]lsp.EditorLocation, bool) {
+	e.lspMu.Lock()
+	defer e.lspMu.Unlock()
+	if !e.references.ready {
+		return nil, false
+	}
+	locs := e.references.locations
+	e.references.locations = nil
+	e.references.ready = false
+	return locs, true
+}
+
+// requestReferencesClose asks the window to hide the references panel on its
+// next frame (Escape or a Shift+F12 toggle). Bumping the epoch cancels any
+// in-flight request so a late result cannot re-open the panel the user just
+// dismissed. UI goroutine only.
+func (e *IDEEditor) requestReferencesClose() {
+	e.refsCloseRequested = true
+	e.lspMu.Lock()
+	e.references.epoch++
+	e.references.locations = nil
+	e.references.ready = false
+	e.lspMu.Unlock()
+}
+
+// takeReferencesClose consumes a pending references-panel close request,
+// reporting whether one was queued since the last frame. UI goroutine only.
+func (e *IDEEditor) takeReferencesClose() bool {
+	req := e.refsCloseRequested
+	e.refsCloseRequested = false
+	return req
+}
+
+// setReferencesPanelOpen mirrors the window's references-panel visibility
+// into the editor so its key handling can route Escape and the Shift+F12
+// toggle correctly. The window calls it every frame before the editor lays
+// out. UI goroutine only.
+func (e *IDEEditor) setReferencesPanelOpen(open bool) {
+	e.refsPanelOpen = open
+}
+
+// triggerFormat launches an async format-document request for the active
+// buffer, using the configured tab size and indentation style. The bridge
+// applies the resulting text edits to the buffer itself, so on success the UI
+// only schedules a redraw. Errors — including
+// lsp.ErrBridgeBufferChangedDuringFormat when the user kept typing while the
+// request was in flight — are dropped silently: formatting is best-effort and
+// the next attempt starts from the new buffer state. (The UI layer has no
+// logger to record them at debug level.)
+func (e *IDEEditor) triggerFormat(wb *Workbench) {
+	c := wb.LSP()
+	if c == nil {
+		return
+	}
+	tab, ok := wb.ActiveTab()
+	if !ok {
+		return
+	}
+	cfg := wb.Session().Config().Editor
+	tabSize := cfg.TabSize
+	if tabSize <= 0 {
+		tabSize = DefaultTabWidth
+	}
+	opts := lsp.FormattingOptions{TabSize: tabSize, InsertSpaces: cfg.InsertSpaces}
+
+	id := tab.BufferID
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), lspRequestTimeout)
+		defer cancel()
+		if _, err := c.Format(ctx, id, opts); err != nil {
+			return
+		}
 		e.doInvalidate()
 	}()
 }

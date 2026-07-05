@@ -130,11 +130,15 @@ func (e *IDEEditor) inputFilters() []event.Filter {
 		key.Filter{Focus: tag, Name: "S", Required: key.ModShortcut},
 
 		// LSP feature triggers, gated on editor focus by the tag: Ctrl+Space
-		// completion, F1 hover, F12 go-to-definition. Escape closes any open
-		// popup (and is otherwise unused by the editor).
+		// completion, F1 hover, F12 go-to-definition — with Shift optional so
+		// Shift+F12 (find references) arrives through the same filter and the
+		// handler branches on the modifier — and Shift+Alt+F format document.
+		// Escape closes any open popup, then the find bar, then the
+		// references panel (see handleLSPKey for the priority order).
 		key.Filter{Focus: tag, Name: key.NameSpace, Required: key.ModShortcut},
 		key.Filter{Focus: tag, Name: key.NameF1},
-		key.Filter{Focus: tag, Name: key.NameF12},
+		key.Filter{Focus: tag, Name: key.NameF12, Optional: key.ModShift},
+		key.Filter{Focus: tag, Name: "F", Required: key.ModShift | key.ModAlt},
 		key.Filter{Focus: tag, Name: key.NameEscape},
 	}
 }

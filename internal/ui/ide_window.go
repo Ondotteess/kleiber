@@ -14,6 +14,8 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
+
+	"github.com/Ondotteess/kleiber/internal/lsp"
 )
 
 // Default IDE window geometry and title used when options leave them unset.
@@ -31,17 +33,25 @@ var ErrNilWorkbench = errors.New("ui: nil workbench")
 
 // ideWindow holds the widgets and theme built once for the window's lifetime.
 type ideWindow struct {
-	theme     *IDETheme
-	tree      *IDETree
-	tabs      *IDETabs
-	editor    *IDEEditor
-	statusBar *IDEStatusBar
-	problems  *IDEProblems
-	terminal  *IDETerminal
+	theme      *IDETheme
+	tree       *IDETree
+	tabs       *IDETabs
+	editor     *IDEEditor
+	statusBar  *IDEStatusBar
+	problems   *IDEProblems
+	references *IDEReferences
+	terminal   *IDETerminal
 
 	// showProblems tracks whether the problems panel is expanded. It is
 	// toggled by Ctrl+M and by clicking the status bar's problem count.
 	showProblems bool
+
+	// showReferences tracks whether the references panel is expanded. The
+	// window owns this flag: it opens the panel when the editor hands over a
+	// find-references result (takeReferencesResult) and closes it when the
+	// editor queues a close request (takeReferencesClose, from Escape or a
+	// Shift+F12 toggle).
+	showReferences bool
 
 	// showTerminal tracks whether the embedded terminal panel is expanded. It
 	// is toggled by Ctrl+J; the panel starts a default shell on its first
@@ -52,13 +62,14 @@ type ideWindow struct {
 // newIDEWindow constructs the widget set for the IDE window.
 func newIDEWindow() *ideWindow {
 	return &ideWindow{
-		theme:     NewIDETheme(),
-		tree:      NewIDETree(),
-		tabs:      NewIDETabs(),
-		editor:    NewIDEEditor(),
-		statusBar: NewIDEStatusBar(),
-		problems:  NewIDEProblems(),
-		terminal:  NewIDETerminal(),
+		theme:      NewIDETheme(),
+		tree:       NewIDETree(),
+		tabs:       NewIDETabs(),
+		editor:     NewIDEEditor(),
+		statusBar:  NewIDEStatusBar(),
+		problems:   NewIDEProblems(),
+		references: NewIDEReferences(),
+		terminal:   NewIDETerminal(),
 	}
 }
 
@@ -99,14 +110,27 @@ func RunIDEWindow(ctx context.Context, wb *Workbench, opts IDEWindowOptions) err
 	view.editor.SetInvalidate(w.Invalidate)
 	// The terminal's per-session goroutine repaints on every screen change.
 	view.terminal.SetInvalidate(w.Invalidate)
+
+	// Keep the explorer live: watch the project for filesystem changes for
+	// the window's lifetime. StartWatching refreshes the tree itself and is a
+	// documented no-op without an open project; the hook only schedules a
+	// repaint. A start error is tolerated — the tree then refreshes only
+	// through manual actions — and the UI layer has no logger to record it.
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch()
+	_ = wb.StartWatching(watchCtx, w.Invalidate)
+
 	var ops op.Ops
 
 	for {
 		event := w.Event()
 		switch event := event.(type) {
 		case gioapp.DestroyEvent:
-			// Kill the terminal's child process before the launcher exits via
-			// os.Exit, which would otherwise orphan the shell or go command.
+			// Stop the filesystem watcher and kill the terminal's child
+			// process before the launcher exits via os.Exit, which would
+			// otherwise orphan the shell or go command. (The deferred cancel
+			// also covers this; cancelling twice is harmless.)
+			cancelWatch()
 			view.terminal.Close()
 			if event.Err != nil && !errors.Is(event.Err, context.Canceled) {
 				return event.Err
@@ -167,12 +191,27 @@ func (v *ideWindow) handleIDEKeys(gtx layout.Context, wb *Workbench, w *gioapp.W
 }
 
 // layout draws the whole window: file tree, a divider, then the tab strip over
-// the editor, with the optional problems and terminal panels and the status bar
-// stacked below. It reports whether any interaction changed state so the caller
-// can request a redraw.
+// the editor, with the optional problems, references and terminal panels and
+// the status bar stacked below (in that order). It reports whether any
+// interaction changed state so the caller can request a redraw.
 func (v *ideWindow) layout(gtx layout.Context, wb *Workbench) bool {
 	paint.FillShape(gtx.Ops, v.theme.Background, clip.Rect{Max: gtx.Constraints.Max}.Op())
 	changed := false
+
+	// Consume the references actions the editor queued during the previous
+	// frame: a close request (Escape / Shift+F12 toggle) hides the panel; a
+	// fresh async result populates and shows it. The mirror below keeps the
+	// editor's key routing in sync with the panel's actual visibility.
+	if v.editor.takeReferencesClose() {
+		v.showReferences = false
+		changed = true
+	}
+	if locs, ok := v.editor.takeReferencesResult(); ok {
+		v.references.setLocations(wb, locs)
+		v.showReferences = true
+		changed = true
+	}
+	v.editor.setReferencesPanelOpen(v.showReferences)
 
 	layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -209,6 +248,15 @@ func (v *ideWindow) layout(gtx layout.Context, wb *Workbench) bool {
 				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					dims, jump := v.problems.Layout(gtx, v.theme, wb)
 					if jump != nil && v.navigateTo(wb, jump) {
+						changed = true
+					}
+					return dims
+				}))
+			}
+			if v.showReferences {
+				children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					dims, jump := v.references.Layout(gtx, v.theme, wb)
+					if jump != nil && v.navigateToReference(wb, jump.Loc) {
 						changed = true
 					}
 					return dims
@@ -255,6 +303,33 @@ func (v *ideWindow) navigateTo(wb *Workbench, jump *problemJump) bool {
 	// Best-effort reveal: put the target line at the top of the viewport on
 	// the next frame, matching the find bar's scroll behavior.
 	v.editor.list.Position.First = jump.Pos.Line
+	v.editor.list.Position.Offset = 0
+	return true
+}
+
+// navigateToReference opens (or re-activates) the file behind a clicked
+// references-panel row, moves that view's caret to the reference's start, and
+// reveals its line at the top of the viewport on the next frame. Cross-file
+// jumps go through wb.OpenFile, which activates an existing tab or opens a
+// new one; the references panel stays open so the user can keep browsing. It
+// reports whether it changed state.
+func (v *ideWindow) navigateToReference(wb *Workbench, loc lsp.EditorLocation) bool {
+	tab, ok := wb.ActiveTab()
+	if !ok || !pathsEqual(tab.Path, loc.Path) {
+		if _, err := wb.OpenFile(context.Background(), loc.Path); err != nil {
+			return false
+		}
+	}
+	view, err := wb.ActiveView()
+	if err != nil || view == nil {
+		return false
+	}
+	if err := view.MoveTo(loc.Range.Start); err != nil {
+		return false
+	}
+	// Best-effort reveal, matching navigateTo: the list is only ever mutated
+	// here on the UI goroutine.
+	v.editor.list.Position.First = loc.Range.Start.Line
 	v.editor.list.Position.Offset = 0
 	return true
 }
