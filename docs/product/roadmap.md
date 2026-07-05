@@ -41,9 +41,14 @@ Current implementation checkpoint — **Milestone 1 delivered**:
   ANSI colors.
 - Also runnable headless: `kleiber --version`, `kleiber help`, `kleiber doctor
   [path]`, and the older `kleiber experimental-ui --smoke [path]` model dump.
-- Still open for a later pass: mouse click-to-caret, incremental didChange,
-  find-references UI, and richer completion (LSP TextEdit application). Manual
-  native-window visual smoke remains documented in
+- Second feature pass delivered: full mouse editing (click-to-caret, drag
+  selection, double/triple-click, automatic editor focus on tab activation),
+  incremental `textDocument/didChange` with shadow-text verification and
+  full-sync fallback, terminal scrollback scrolling, a find-references panel,
+  format-document on demand, and a file tree that follows filesystem changes.
+- Still open for a later pass: richer completion (LSP TextEdit application),
+  auto-scroll while drag-selecting past the viewport, and terminal wide-glyph
+  rendering. Manual native-window visual smoke remains documented in
   `docs/contributing/gio-smoke.md`.
 
 ## Milestone 2 — Debugger and Test Runner (target: Q4 2026)

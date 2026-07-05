@@ -73,9 +73,17 @@ Keyboard shortcuts (use `Cmd` instead of `Ctrl` on macOS):
 | `Ctrl+Space` | Completion |
 | `F1` | Hover |
 | `F12` | Go to definition |
+| `Shift+F12` | Find references |
+| `Shift+Alt+F` | Format document |
 | `Ctrl+M` | Toggle problems panel |
 | `Ctrl+J` | Toggle terminal (Run / Build / Test / Mod Tidy buttons) |
 | `Ctrl+W` | Close tab |
+
+The editor is fully mouse-aware: click places the caret, dragging and
+Shift+click extend the selection, double-click selects a word,
+triple-click selects a line, and the wheel scrolls both the editor and
+the terminal's scrollback history. The file tree refreshes automatically
+when files change on disk.
 
 On Linux the Gio window needs the usual desktop dev libraries (Vulkan/OpenGL,
 X11 or Wayland, Wayland/xkbcommon headers); see the
